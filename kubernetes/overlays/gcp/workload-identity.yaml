@@ -1,0 +1,9 @@
+# GCP Workload Identity configuration
+# Allows pods to access GCP services without static credentials
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: relay-service
+  namespace: mirqab-relay
+  annotations:
+    iam.gke.io/gcp-service-account: mirqab-relay@PROJECT_ID.iam.gserviceaccount.com

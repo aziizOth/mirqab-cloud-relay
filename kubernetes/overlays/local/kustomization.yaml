@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mirqab-relay
+
+resources:
+  - ../../base
+
+patches:
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: mirqab/http-c2:dev
+    target:
+      kind: Deployment
+      name: http-c2
+
+configMapGenerator:
+  - name: relay-config
+    behavior: merge
+    literals:
+      - environment=local
+      - command_center_url=http://host.k3d.internal:8000
+      - storage_backend=local
+
+secretGenerator:
+  - name: relay-secrets
+    literals:
+      - signing_key=local-dev-key-change-me

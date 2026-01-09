@@ -1,0 +1,17 @@
+# HTTP C2 Relay Service
+# Receives REAL C2 callbacks from OffenSight agents
+# Cloud-agnostic - works on GCP, AWS, Azure, or on-prem
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+pydantic==2.10.3
+cryptography==43.0.0
+python-jose[cryptography]==3.3.0
+structlog==24.4.0
+
+# Cloud storage - install based on your provider:
+# pip install boto3                  # AWS S3
+# pip install google-cloud-storage   # GCP Cloud Storage
+# pip install azure-storage-blob     # Azure Blob Storage
+# pip install minio                  # MinIO (on-prem/any cloud)

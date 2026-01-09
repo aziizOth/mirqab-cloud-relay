@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-c2
+  namespace: mirqab-relay
+  labels:
+    app: http-c2
+    app.kubernetes.io/name: http-c2
+    app.kubernetes.io/component: c2-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: http-c2
+  template:
+    metadata:
+      labels:
+        app: http-c2
+        mirqab.io/needs-command-center: "true"
+    spec:
+      serviceAccountName: relay-service
+      containers:
+        - name: http-c2
+          image: mirqab/http-c2:latest  # Override in overlay
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: relay-config
+                  key: environment
+            - name: COMMAND_CENTER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: relay-config
+                  key: command_center_url
+            - name: SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: relay-secrets
+                  key: signing_key
+            - name: STORAGE_BACKEND
+              valueFrom:
+                configMapKeyRef:
+                  name: relay-config
+                  key: storage_backend
+                  optional: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+      securityContext:
+        fsGroup: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-c2
+  namespace: mirqab-relay
+  labels:
+    app: http-c2
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: http-c2

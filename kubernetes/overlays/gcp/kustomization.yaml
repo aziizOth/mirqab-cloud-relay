@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mirqab-relay
+
+resources:
+  - ../../base
+  - ingress.yaml
+  - workload-identity.yaml
+
+patches:
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: gcr.io/PROJECT_ID/http-c2:latest
+    target:
+      kind: Deployment
+      name: http-c2
+
+configMapGenerator:
+  - name: relay-config
+    behavior: merge
+    literals:
+      - environment=prod
+      - command_center_url=https://api.mirqab.io
+      - storage_backend=gcs
+      - gcs_bucket=mirqab-exfil-BUCKET_SUFFIX
+
+# Secrets should come from GCP Secret Manager via External Secrets Operator
+# or Workload Identity

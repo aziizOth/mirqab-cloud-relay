@@ -1,0 +1,55 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: relay-ingress
+  namespace: mirqab-relay
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: "mirqab-relay-ip"
+    networking.gke.io/managed-certificates: "relay-cert"
+    networking.gke.io/v1beta1.FrontendConfig: "relay-frontend"
+spec:
+  rules:
+    - host: relay.mirqab.io
+      http:
+        paths:
+          - path: /beacon
+            pathType: Prefix
+            backend:
+              service:
+                name: http-c2
+                port:
+                  number: 80
+          - path: /exfil
+            pathType: Prefix
+            backend:
+              service:
+                name: http-c2
+                port:
+                  number: 80
+          - path: /download
+            pathType: Prefix
+            backend:
+              service:
+                name: http-c2
+                port:
+                  number: 80
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: relay-cert
+  namespace: mirqab-relay
+spec:
+  domains:
+    - relay.mirqab.io
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: relay-frontend
+  namespace: mirqab-relay
+spec:
+  sslPolicy: relay-ssl-policy
+  redirectToHttps:
+    enabled: true

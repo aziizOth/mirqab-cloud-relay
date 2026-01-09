@@ -1,0 +1,92 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-default-deny
+  namespace: mirqab-relay
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-http-c2-ingress
+  namespace: mirqab-relay
+spec:
+  podSelector:
+    matchLabels:
+      app: http-c2
+  policyTypes:
+    - Ingress
+  ingress:
+    - from: []  # Allow from anywhere (agents connect from customer networks)
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-c2-ingress
+  namespace: mirqab-relay
+spec:
+  podSelector:
+    matchLabels:
+      app: dns-c2
+  policyTypes:
+    - Ingress
+  ingress:
+    - from: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-command-center
+  namespace: mirqab-relay
+spec:
+  podSelector:
+    matchLabels:
+      mirqab.io/needs-command-center: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to: []  # Allow egress to Command Center (configure CIDR in overlay)
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 8000
+---
+# Tenant namespace network policy template
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-isolation
+  namespace: mirqab-relay-tenant-template
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only allow from relay services in main namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/name: mirqab-relay
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # Only allow to relay services
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/name: mirqab-relay

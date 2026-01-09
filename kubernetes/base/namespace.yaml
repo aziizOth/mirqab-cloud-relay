@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mirqab-relay
+  labels:
+    app.kubernetes.io/name: mirqab-relay
+    app.kubernetes.io/component: c2-relay
+---
+# Tenant namespace template (create per tenant)
+# kubectl create namespace mirqab-relay-tenant-{tenant_id}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mirqab-relay-tenant-template
+  labels:
+    app.kubernetes.io/name: mirqab-relay
+    app.kubernetes.io/component: tenant
+    mirqab.io/tenant-id: "TENANT_ID"
