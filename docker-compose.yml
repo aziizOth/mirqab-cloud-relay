@@ -1,0 +1,127 @@
+# Mirqab Cloud Relay - Local Development
+# Docker Compose for running all relay services locally
+
+version: '3.8'
+
+services:
+  # ===========================================
+  # REVERSE PROXY
+  # ===========================================
+  traefik:
+    image: traefik:v3.0
+    container_name: relay-traefik
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.smtp.address=:587"
+      - "--accesslog=true"
+      - "--log.level=INFO"
+    ports:
+      - "80:80"
+      - "587:587"
+      - "8080:8080"  # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - relay-net
+    restart: unless-stopped
+
+  # ===========================================
+  # HTTP C2 SERVICE
+  # ===========================================
+  http-c2:
+    build:
+      context: ./services/http-c2
+      dockerfile: Dockerfile
+    container_name: relay-http-c2
+    environment:
+      - ENVIRONMENT=local
+      - COMMAND_CENTER_URL=http://host.docker.internal:8000
+      - SIGNING_KEY=${SIGNING_KEY:-local-dev-key-change-me}
+      - STORAGE_BACKEND=local
+    networks:
+      - relay-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.http-c2.rule=PathPrefix(`/beacon`) || PathPrefix(`/exfil`) || PathPrefix(`/download`) || PathPrefix(`/stage`)"
+      - "traefik.http.routers.http-c2.entrypoints=web"
+      - "traefik.http.services.http-c2.loadbalancer.server.port=8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ===========================================
+  # SMTP PHISHING SERVICE
+  # ===========================================
+  smtp-phishing:
+    build:
+      context: ./services/smtp-phishing
+      dockerfile: Dockerfile
+    container_name: relay-smtp-phishing
+    environment:
+      - PHISHING_ENVIRONMENT=local
+      - PHISHING_COMMAND_CENTER_URL=http://host.docker.internal:8000
+      - PHISHING_SIGNING_KEY=${SIGNING_KEY:-local-dev-key-change-me}
+      - PHISHING_SMTP_HOST=mailhog
+      - PHISHING_SMTP_PORT=1025
+      - PHISHING_SMTP_USE_TLS=false
+      - PHISHING_SERVICE_URL=http://localhost/phishing
+      - PHISHING_SMTP_FROM_DOMAIN=phishing.local
+    networks:
+      - relay-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.smtp.rule=PathPrefix(`/phishing`) || PathPrefix(`/track`) || PathPrefix(`/landing`)"
+      - "traefik.http.routers.smtp.entrypoints=web"
+      - "traefik.http.services.smtp.loadbalancer.server.port=8081"
+      # Rewrite /phishing prefix
+      - "traefik.http.middlewares.smtp-strip.stripprefix.prefixes=/phishing"
+      - "traefik.http.routers.smtp.middlewares=smtp-strip"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # ===========================================
+  # MAILHOG - Local SMTP Server for Testing
+  # ===========================================
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: relay-mailhog
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI
+    networks:
+      - relay-net
+    restart: unless-stopped
+
+  # ===========================================
+  # REDIS - Session/Cache (optional)
+  # ===========================================
+  redis:
+    image: redis:7-alpine
+    container_name: relay-redis
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    networks:
+      - relay-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  relay-net:
+    driver: bridge
+
+volumes:
+  relay-data:
