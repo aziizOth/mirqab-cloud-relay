@@ -1,0 +1,343 @@
+# Mirqab Cloud Relay - Prometheus Stack Configuration
+# Deploys kube-prometheus-stack via Helm values
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/name: monitoring
+---
+# Prometheus configuration values for kube-prometheus-stack Helm chart
+# Install: helm install prometheus prometheus-community/kube-prometheus-stack -n monitoring -f prometheus-stack.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-helm-values
+  namespace: monitoring
+data:
+  values.yaml: |
+    # Global settings
+    fullnameOverride: mirqab-prometheus
+
+    # Prometheus
+    prometheus:
+      enabled: true
+      prometheusSpec:
+        replicas: 2
+        retention: 30d
+        retentionSize: "50GB"
+
+        # Resource limits
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2Gi
+          limits:
+            cpu: 2
+            memory: 4Gi
+
+        # Storage
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: gp3
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 100Gi
+
+        # Service discovery for tenant namespaces
+        serviceMonitorSelectorNilUsesHelmValues: false
+        podMonitorSelectorNilUsesHelmValues: false
+        ruleSelectorNilUsesHelmValues: false
+
+        # Additional scrape configs for Mirqab services
+        additionalScrapeConfigs:
+          # Scrape all tenant C2 services
+          - job_name: 'mirqab-c2-http'
+            kubernetes_sd_configs:
+              - role: pod
+                namespaces:
+                  names: []  # All namespaces
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_pod_label_mirqab_io_component]
+                action: keep
+                regex: c2-service
+              - source_labels: [__meta_kubernetes_pod_label_app]
+                action: keep
+                regex: c2-http
+              - source_labels: [__meta_kubernetes_namespace]
+                target_label: tenant_namespace
+              - source_labels: [__meta_kubernetes_pod_label_mirqab_io_tenant_id]
+                target_label: tenant_id
+              - source_labels: [__meta_kubernetes_pod_name]
+                target_label: pod
+            metrics_path: /metrics
+            scrape_interval: 15s
+
+          # Scrape C2 DNS services
+          - job_name: 'mirqab-c2-dns'
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_pod_label_mirqab_io_component]
+                action: keep
+                regex: c2-service
+              - source_labels: [__meta_kubernetes_pod_label_app]
+                action: keep
+                regex: c2-dns
+              - source_labels: [__meta_kubernetes_namespace]
+                target_label: tenant_namespace
+              - source_labels: [__meta_kubernetes_pod_label_mirqab_io_tenant_id]
+                target_label: tenant_id
+            metrics_path: /metrics
+            scrape_interval: 15s
+
+          # Scrape payload servers
+          - job_name: 'mirqab-payload-server'
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_pod_label_mirqab_io_component]
+                action: keep
+                regex: payload-service
+              - source_labels: [__meta_kubernetes_namespace]
+                target_label: tenant_namespace
+              - source_labels: [__meta_kubernetes_pod_label_mirqab_io_tenant_id]
+                target_label: tenant_id
+            metrics_path: /metrics
+            scrape_interval: 30s
+
+          # Scrape operator metrics
+          - job_name: 'mirqab-operator'
+            kubernetes_sd_configs:
+              - role: service
+                namespaces:
+                  names:
+                    - mirqab-system
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+                action: keep
+                regex: mirqab-operator
+            metrics_path: /metrics
+            scrape_interval: 30s
+
+    # Alertmanager
+    alertmanager:
+      enabled: true
+      alertmanagerSpec:
+        replicas: 2
+        storage:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: gp3
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 10Gi
+
+    # Grafana
+    grafana:
+      enabled: true
+      replicas: 2
+      adminPassword: "${GRAFANA_ADMIN_PASSWORD}"
+
+      persistence:
+        enabled: true
+        storageClassName: gp3
+        size: 10Gi
+
+      sidecar:
+        dashboards:
+          enabled: true
+          label: grafana_dashboard
+          labelValue: "1"
+          searchNamespace: ALL
+        datasources:
+          enabled: true
+          label: grafana_datasource
+
+      # Additional data sources
+      additionalDataSources:
+        - name: Loki
+          type: loki
+          url: http://loki:3100
+          access: proxy
+          isDefault: false
+
+      # Grafana ingress
+      ingress:
+        enabled: true
+        ingressClassName: nginx
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+        hosts:
+          - grafana.mirqab.io
+        tls:
+          - secretName: grafana-tls
+            hosts:
+              - grafana.mirqab.io
+
+    # Node exporter
+    nodeExporter:
+      enabled: true
+
+    # Kube-state-metrics
+    kubeStateMetrics:
+      enabled: true
+
+    # Default rules
+    defaultRules:
+      create: true
+      rules:
+        alertmanager: true
+        etcd: false
+        configReloaders: true
+        general: true
+        k8s: true
+        kubeApiserverAvailability: true
+        kubeApiserverBurnrate: true
+        kubeApiserverHistogram: true
+        kubeApiserverSlos: true
+        kubeControllerManager: false
+        kubePrometheusGeneral: true
+        kubePrometheusNodeRecording: true
+        kubeScheduler: false
+        kubernetesApps: true
+        kubernetesResources: true
+        kubernetesStorage: true
+        kubernetesSystem: true
+        network: true
+        node: true
+        nodeExporterAlerting: true
+        nodeExporterRecording: true
+        prometheus: true
+        prometheusOperator: true
+---
+# Prometheus Rules for Mirqab-specific alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: mirqab-alerts
+  namespace: monitoring
+  labels:
+    prometheus: mirqab-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: mirqab.tenant.rules
+      rules:
+        # Tenant health alerts
+        - alert: TenantC2HttpDown
+          expr: up{job="mirqab-c2-http"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "C2 HTTP service down for tenant {{ $labels.tenant_id }}"
+            description: "C2 HTTP service in namespace {{ $labels.tenant_namespace }} has been down for more than 5 minutes."
+
+        - alert: TenantC2DnsDown
+          expr: up{job="mirqab-c2-dns"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "C2 DNS service down for tenant {{ $labels.tenant_id }}"
+            description: "C2 DNS service in namespace {{ $labels.tenant_namespace }} has been down for more than 5 minutes."
+
+        - alert: TenantPayloadServerDown
+          expr: up{job="mirqab-payload-server"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Payload server down for tenant {{ $labels.tenant_id }}"
+            description: "Payload server in namespace {{ $labels.tenant_namespace }} has been down for more than 5 minutes."
+
+        # C2 beacon metrics
+        - alert: HighBeaconErrorRate
+          expr: rate(mirqab_c2_http_beacon_errors_total[5m]) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High beacon error rate for tenant {{ $labels.tenant_id }}"
+            description: "Beacon error rate exceeds 10% for tenant {{ $labels.tenant_id }}."
+
+        - alert: NoBeaconActivity
+          expr: increase(mirqab_c2_http_beacons_total[1h]) == 0
+          for: 2h
+          labels:
+            severity: info
+          annotations:
+            summary: "No beacon activity for tenant {{ $labels.tenant_id }}"
+            description: "No beacon check-ins recorded for tenant {{ $labels.tenant_id }} in the last 2 hours."
+
+        # Storage alerts
+        - alert: PayloadStorageNearLimit
+          expr: (mirqab_payload_storage_used_bytes / mirqab_payload_storage_limit_bytes) > 0.8
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Payload storage near limit for tenant {{ $labels.tenant_id }}"
+            description: "Tenant {{ $labels.tenant_id }} has used over 80% of their payload storage quota."
+
+        - alert: PayloadStorageFull
+          expr: (mirqab_payload_storage_used_bytes / mirqab_payload_storage_limit_bytes) > 0.95
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Payload storage almost full for tenant {{ $labels.tenant_id }}"
+            description: "Tenant {{ $labels.tenant_id }} has used over 95% of their payload storage quota."
+
+        # License alerts
+        - alert: LicenseExpiringSoon
+          expr: (mirqab_tenant_license_expires_at - time()) < (7 * 24 * 3600)
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "License expiring soon for tenant {{ $labels.tenant_id }}"
+            description: "License for tenant {{ $labels.tenant_id }} expires in less than 7 days."
+
+        - alert: LicenseExpired
+          expr: (mirqab_tenant_license_expires_at - time()) < 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "License expired for tenant {{ $labels.tenant_id }}"
+            description: "License for tenant {{ $labels.tenant_id }} has expired."
+
+    - name: mirqab.operator.rules
+      rules:
+        - alert: OperatorDown
+          expr: up{job="mirqab-operator"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Mirqab operator is down"
+            description: "The Mirqab Kubernetes operator has been down for more than 5 minutes."
+
+        - alert: TenantProvisioningFailed
+          expr: increase(mirqab_operator_tenant_provisioning_failures_total[1h]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Tenant provisioning failures detected"
+            description: "One or more tenant provisioning operations have failed in the last hour."
+
+        - alert: HighReconcileLatency
+          expr: histogram_quantile(0.99, rate(mirqab_operator_reconcile_duration_seconds_bucket[5m])) > 30
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High reconcile latency in Mirqab operator"
+            description: "P99 reconcile latency exceeds 30 seconds."

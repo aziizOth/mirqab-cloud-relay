@@ -1,0 +1,184 @@
+# Mirqab Cloud Relay - Operator Deployment
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mirqab-system
+  labels:
+    app.kubernetes.io/name: mirqab-operator
+    app.kubernetes.io/component: operator
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mirqab-operator
+  namespace: mirqab-system
+  labels:
+    app.kubernetes.io/name: mirqab-operator
+    app.kubernetes.io/component: operator
+spec:
+  replicas: 2  # HA with leader election
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mirqab-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mirqab-operator
+        app.kubernetes.io/component: operator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: mirqab-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: operator
+          image: ghcr.io/mirqab/cloud-relay/operator:latest
+          imagePullPolicy: Always
+          args:
+            - --leader-elect=true
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+            - --zap-log-level=info
+            - --zap-encoder=json
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          env:
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OPERATOR_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: BASE_DOMAIN
+              value: "relay.mirqab.io"
+            - name: C2_DNS_DOMAIN
+              value: "c2.mirqab.io"
+            - name: IMAGE_TAG
+              value: "latest"
+            - name: LICENSE_VALIDATION_URL
+              value: "https://api.mirqab.io/v1/license/validate"
+          envFrom:
+            - secretRef:
+                name: mirqab-operator-secrets
+                optional: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: ca-certs
+              mountPath: /etc/mirqab/ca
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: ca-certs
+          secret:
+            secretName: mirqab-ca-certs
+            optional: true
+        - name: tmp
+          emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: mirqab-operator
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: mirqab-operator
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mirqab-operator-metrics
+  namespace: mirqab-system
+  labels:
+    app.kubernetes.io/name: mirqab-operator
+spec:
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: mirqab-operator
+---
+# PodDisruptionBudget for HA
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mirqab-operator-pdb
+  namespace: mirqab-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mirqab-operator
+---
+# ServiceMonitor for Prometheus (if using prometheus-operator)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mirqab-operator
+  namespace: mirqab-system
+  labels:
+    app.kubernetes.io/name: mirqab-operator
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mirqab-operator
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics

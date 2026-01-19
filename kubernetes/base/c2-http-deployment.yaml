@@ -1,0 +1,232 @@
+# Mirqab Cloud Relay - C2 HTTP Simulator Deployment
+# Template for per-tenant deployment
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c2-http
+  namespace: tenant-${TENANT_ID}
+  labels:
+    app: c2-http
+    mirqab.io/tenant-id: "${TENANT_ID}"
+    mirqab.io/component: c2-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: c2-http
+      mirqab.io/tenant-id: "${TENANT_ID}"
+  template:
+    metadata:
+      labels:
+        app: c2-http
+        mirqab.io/tenant-id: "${TENANT_ID}"
+        mirqab.io/component: c2-service
+        mirqab.io/isolated: "true"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      runtimeClassName: gvisor
+      serviceAccountName: tenant-workload
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: c2-http
+          image: ghcr.io/mirqab/cloud-relay/c2-http:${VERSION}
+          imagePullPolicy: Always
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: TENANT_ID
+              value: "${TENANT_ID}"
+            - name: SERVER_PORT
+              value: "8443"
+            - name: METRICS_PORT
+              value: "9090"
+            - name: BEACON_INTERVAL
+              value: "60s"
+            - name: JITTER_PERCENT
+              value: "20"
+            - name: TLS_ENABLED
+              value: "true"
+            - name: TLS_CERT_PATH
+              value: "/etc/ssl/certs/tls.crt"
+            - name: TLS_KEY_PATH
+              value: "/etc/ssl/private/tls.key"
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: c2-http-secrets
+                  key: admin-token
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: c2-http-secrets
+                  key: redis-url
+                  optional: true
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /etc/ssl/certs
+              readOnly: true
+            - name: tls-keys
+              mountPath: /etc/ssl/private
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: c2-http-tls
+            items:
+              - key: tls.crt
+                path: tls.crt
+        - name: tls-keys
+          secret:
+            secretName: c2-http-tls
+            items:
+              - key: tls.key
+                path: tls.key
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: c2-http
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfied: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: c2-http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: c2-http
+  namespace: tenant-${TENANT_ID}
+  labels:
+    app: c2-http
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  type: ClusterIP
+  selector:
+    app: c2-http
+    mirqab.io/tenant-id: "${TENANT_ID}"
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: c2-http
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: c2-http
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: c2-http
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: c2-http
+      mirqab.io/tenant-id: "${TENANT_ID}"

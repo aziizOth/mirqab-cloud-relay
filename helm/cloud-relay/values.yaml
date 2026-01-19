@@ -1,0 +1,217 @@
+# Cloud Relay Helm Values
+
+# Global settings
+global:
+  environment: production
+  imagePullPolicy: IfNotPresent
+
+# Domain configuration
+domain: relay.example.com
+
+# TLS configuration
+tls:
+  enabled: true
+  issuer: letsencrypt-prod  # or letsencrypt-staging for testing
+
+# Master Server connection
+masterServer:
+  endpoint: ""
+  apiKey: ""
+
+# C2 Simulator
+c2Simulator:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: offensight/cloud-relay-c2
+    tag: latest
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  # Beacon configuration
+  beacon:
+    minInterval: 30
+    maxInterval: 300
+    jitter: 0.2
+
+# Exfiltration Server
+exfilServer:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: offensight/cloud-relay-exfil
+    tag: latest
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  # Supported channels
+  channels:
+    https: true
+    dns: true
+    icmp: false
+
+# Phishing Platform
+phishing:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: offensight/cloud-relay-phishing
+    tag: latest
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+# Payload Hosting
+payloadHosting:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: offensight/cloud-relay-payload
+    tag: latest
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+# DNS Tunnel Server
+dnsTunnel:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: offensight/cloud-relay-dns
+    tag: latest
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+# WAF Tester
+wafTester:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: offensight/cloud-relay-waf
+    tag: latest
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  # AI model for payload generation
+  ai:
+    enabled: true
+    model: "gpt-4"
+
+# API Gateway
+apiGateway:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: offensight/cloud-relay-gateway
+    tag: latest
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+# Database (external - use secrets)
+database:
+  external: true
+  # If external=false, deploy embedded PostgreSQL
+  host: ""
+  port: 5432
+  name: cloudrelay
+  user: cloudrelay
+  existingSecret: db-credentials
+
+# Redis
+redis:
+  enabled: false  # Use external from Terraform
+  external:
+    host: ""
+    port: 6379
+  existingSecret: redis-credentials
+
+# S3/Object Storage
+storage:
+  type: s3  # s3, azure-blob, gcs
+  bucket: ""
+  region: ""
+  existingSecret: s3-credentials
+
+# Ingress
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+
+# Service Account
+serviceAccount:
+  create: true
+  name: cloud-relay
+  annotations: {}
+
+# Pod Security
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# Autoscaling
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Network Policy
+networkPolicy:
+  enabled: true
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Monitoring
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false  # Enable if Prometheus Operator is installed
+
+# Logging
+logging:
+  level: info
+  format: json

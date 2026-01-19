@@ -1,0 +1,75 @@
+# Mirqab Cloud Relay - Example Tenant Resources
+---
+# Trial tier tenant
+apiVersion: mirqab.io/v1
+kind: Tenant
+metadata:
+  name: acme-corp-trial
+spec:
+  licenseKey: "MIRQAB-TRL-A1B2C3D4-E5F6G7H8I9J0"
+  organizationName: "ACME Corporation"
+  tier: trial
+  adminEmail: "security@acme.com"
+  features:
+    c2Http: true
+    payloadHosting: true
+---
+# POC tier tenant (6 months)
+apiVersion: mirqab.io/v1
+kind: Tenant
+metadata:
+  name: megacorp-poc
+spec:
+  licenseKey: "MIRQAB-POC-B2C3D4E5-F6G7H8I9J0K1"
+  organizationName: "MegaCorp Industries"
+  tier: poc
+  adminEmail: "redteam@megacorp.com"
+  features:
+    c2Http: true
+    c2Dns: true
+    payloadHosting: true
+---
+# Professional tier tenant
+apiVersion: mirqab.io/v1
+kind: Tenant
+metadata:
+  name: securityfirst-pro
+spec:
+  licenseKey: "MIRQAB-PRO-D4E5F6G7-H8I9J0K1L2M3"
+  organizationName: "SecurityFirst LLC"
+  tier: professional
+  adminEmail: "ops@securityfirst.io"
+  features:
+    c2Http: true
+    c2Dns: true
+    c2Smb: true
+    payloadHosting: true
+    customDomains: true
+  customDomains:
+    - "phishing.securityfirst.io"
+    - "updates.securityfirst.io"
+---
+# Enterprise tier tenant
+apiVersion: mirqab.io/v1
+kind: Tenant
+metadata:
+  name: globalbank-enterprise
+spec:
+  licenseKey: "MIRQAB-ENT-E5F6G7H8-I9J0K1L2M3N4"
+  organizationName: "Global Bank"
+  tier: enterprise
+  adminEmail: "cybersecurity@globalbank.com"
+  features:
+    c2Http: true
+    c2Dns: true
+    c2Smb: true
+    payloadHosting: true
+    customDomains: true
+  customDomains:
+    - "secure-cdn.globalbank.com"
+    - "patch-server.globalbank.com"
+    - "update-service.globalbank.com"
+  resourceOverrides:
+    maxPods: 75
+    cpuLimit: "12"
+    memoryLimit: "16Gi"

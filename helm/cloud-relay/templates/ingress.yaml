@@ -1,0 +1,96 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml .Values.ingress.annotations | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.domain }}
+        - "*.{{ .Values.domain }}"
+      secretName: {{ include "cloud-relay.fullname" . }}-tls
+  {{- end }}
+  rules:
+    # Main domain - API Gateway
+    - host: {{ .Values.domain }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "cloud-relay.fullname" . }}-gateway
+                port:
+                  number: 443
+
+    # C2 endpoints
+    - host: c2.{{ .Values.domain }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "cloud-relay.fullname" . }}-c2
+                port:
+                  number: 443
+
+    # Phishing endpoints
+    - host: "*.{{ .Values.domain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "cloud-relay.fullname" . }}-phishing
+                port:
+                  number: 443
+
+    # Payload hosting
+    - host: payload.{{ .Values.domain }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "cloud-relay.fullname" . }}-payload
+                port:
+                  number: 443
+
+    # WAF Tester
+    - host: waf.{{ .Values.domain }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "cloud-relay.fullname" . }}-waf
+                port:
+                  number: 443
+---
+{{- if .Values.tls.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-tls
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "cloud-relay.fullname" . }}-tls
+  issuerRef:
+    name: {{ .Values.tls.issuer }}
+    kind: ClusterIssuer
+  dnsNames:
+    - {{ .Values.domain }}
+    - "*.{{ .Values.domain }}"
+{{- end }}
+{{- end }}

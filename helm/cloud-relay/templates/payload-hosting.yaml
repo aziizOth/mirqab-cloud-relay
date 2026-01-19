@@ -1,0 +1,129 @@
+{{- if .Values.payloadHosting.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-payload
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: payload-hosting
+spec:
+  replicas: {{ .Values.payloadHosting.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cloud-relay.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: payload-hosting
+  template:
+    metadata:
+      labels:
+        {{- include "cloud-relay.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: payload-hosting
+    spec:
+      serviceAccountName: {{ include "cloud-relay.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: payload-hosting
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.payloadHosting.image.repository }}:{{ .Values.payloadHosting.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: ENVIRONMENT
+              value: {{ .Values.global.environment }}
+            - name: DOMAIN
+              value: {{ .Values.domain }}
+            - name: LOG_LEVEL
+              value: {{ .Values.logging.level }}
+            # Payload configuration
+            - name: PAYLOAD_DIR
+              value: /payloads
+            - name: SIGNED_URL_EXPIRY
+              value: {{ .Values.payloadHosting.signedUrlExpiry | quote }}
+            - name: TRACK_DOWNLOADS
+              value: {{ .Values.payloadHosting.trackDownloads | quote }}
+            - name: ENABLE_STAGING
+              value: {{ .Values.payloadHosting.enableStaging | quote }}
+            # Storage bucket for payloads
+            - name: STORAGE_BUCKET
+              value: {{ .Values.storage.bucket }}
+            - name: STORAGE_PREFIX
+              value: "payloads/"
+            # Database
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: host
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: port
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: database
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: password
+          volumeMounts:
+            - name: payload-storage
+              mountPath: /payloads
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.payloadHosting.resources | nindent 12 }}
+      volumes:
+        - name: payload-storage
+          emptyDir:
+            sizeLimit: {{ .Values.payloadHosting.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-payload
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: payload-hosting
+spec:
+  type: ClusterIP
+  ports:
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+    - port: 9090
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "cloud-relay.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: payload-hosting
+{{- end }}

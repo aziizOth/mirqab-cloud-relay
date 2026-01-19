@@ -1,0 +1,116 @@
+{{- if .Values.c2Simulator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-c2
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: c2-simulator
+spec:
+  replicas: {{ .Values.c2Simulator.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cloud-relay.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: c2-simulator
+  template:
+    metadata:
+      labels:
+        {{- include "cloud-relay.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: c2-simulator
+    spec:
+      serviceAccountName: {{ include "cloud-relay.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: c2-simulator
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.c2Simulator.image.repository }}:{{ .Values.c2Simulator.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: ENVIRONMENT
+              value: {{ .Values.global.environment }}
+            - name: DOMAIN
+              value: {{ .Values.domain }}
+            - name: BEACON_MIN_INTERVAL
+              value: {{ .Values.c2Simulator.beacon.minInterval | quote }}
+            - name: BEACON_MAX_INTERVAL
+              value: {{ .Values.c2Simulator.beacon.maxInterval | quote }}
+            - name: BEACON_JITTER
+              value: {{ .Values.c2Simulator.beacon.jitter | quote }}
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: host
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: port
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: database
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: username
+            - name: REDIS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: host
+            - name: REDIS_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: port
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.c2Simulator.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-c2
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: c2-simulator
+spec:
+  type: ClusterIP
+  ports:
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+    - port: 9090
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "cloud-relay.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: c2-simulator
+{{- end }}

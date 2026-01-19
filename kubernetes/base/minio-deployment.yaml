@@ -1,0 +1,262 @@
+# Mirqab Cloud Relay - MinIO Object Storage
+# Shared storage backend for payload hosting
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: storage
+  labels:
+    mirqab.io/component: storage
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: storage
+  labels:
+    app: minio
+    mirqab.io/component: storage
+spec:
+  serviceName: minio-headless
+  replicas: 4  # Distributed mode for high availability
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+        mirqab.io/component: storage
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
+        prometheus.io/path: "/minio/v2/metrics/cluster"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2024-01-01T00-00-00Z
+          args:
+            - server
+            - http://minio-{0...3}.minio-headless.storage.svc.cluster.local/data
+            - --console-address
+            - ":9001"
+          ports:
+            - name: api
+              containerPort: 9000
+              protocol: TCP
+            - name: console
+              containerPort: 9001
+              protocol: TCP
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: root-password
+            - name: MINIO_PROMETHEUS_AUTH_TYPE
+              value: "public"
+            - name: MINIO_BROWSER
+              value: "on"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # MinIO needs to write
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: minio
+              topologyKey: kubernetes.io/hostname
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: gp3-encrypted
+        resources:
+          requests:
+            storage: 100Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: storage
+  labels:
+    app: minio
+spec:
+  type: ClusterIP
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+    - name: console
+      port: 9001
+      targetPort: 9001
+      protocol: TCP
+---
+# Headless service for StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-headless
+  namespace: storage
+  labels:
+    app: minio
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+---
+# Storage class for encrypted EBS volumes
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3-encrypted
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  encrypted: "true"
+  fsType: ext4
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+# Secret for MinIO credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-credentials
+  namespace: storage
+type: Opaque
+stringData:
+  root-user: "mirqab-minio-admin"
+  root-password: "REPLACE_WITH_SECURE_PASSWORD"
+---
+# Network Policy for MinIO
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: minio-network-policy
+  namespace: storage
+spec:
+  podSelector:
+    matchLabels:
+      app: minio
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow from tenant namespaces (payload servers)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              mirqab.io/tenant: "true"
+        - podSelector:
+            matchLabels:
+              app: payload-server
+      ports:
+        - protocol: TCP
+          port: 9000
+    # Allow MinIO cluster communication
+    - from:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - protocol: TCP
+          port: 9000
+    # Allow monitoring
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9000
+  egress:
+    # Allow MinIO cluster communication
+    - to:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - protocol: TCP
+          port: 9000
+    # Allow DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+---
+# PodDisruptionBudget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: minio
+  namespace: storage
+spec:
+  minAvailable: 3  # At least 3 of 4 replicas must be available
+  selector:
+    matchLabels:
+      app: minio

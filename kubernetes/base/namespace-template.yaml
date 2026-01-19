@@ -1,0 +1,220 @@
+# Mirqab Cloud Relay - Tenant Namespace Template
+# This template is used by the tenant provisioning controller
+# to create isolated namespaces for each tenant
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-${TENANT_ID}
+  labels:
+    app.kubernetes.io/managed-by: mirqab-cloud-relay
+    mirqab.io/tenant-id: "${TENANT_ID}"
+    mirqab.io/tier: "${TENANT_TIER}"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+  annotations:
+    mirqab.io/created-at: "${CREATED_AT}"
+    mirqab.io/provisioned-by: "tenant-controller"
+---
+# Resource Quota per Tenant
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-quota
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  hard:
+    # Starter tier defaults
+    requests.cpu: "${CPU_REQUEST_LIMIT}"
+    requests.memory: "${MEMORY_REQUEST_LIMIT}"
+    limits.cpu: "${CPU_LIMIT}"
+    limits.memory: "${MEMORY_LIMIT}"
+    pods: "${MAX_PODS}"
+    services: "${MAX_SERVICES}"
+    secrets: "${MAX_SECRETS}"
+    configmaps: "${MAX_CONFIGMAPS}"
+    persistentvolumeclaims: "${MAX_PVCS}"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+---
+# Limit Range for containers
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: tenant-limits
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "2"
+        memory: "4Gi"
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+    - type: Pod
+      max:
+        cpu: "4"
+        memory: "8Gi"
+    - type: PersistentVolumeClaim
+      max:
+        storage: "10Gi"
+      min:
+        storage: "1Gi"
+---
+# Network Policy - Default deny all ingress/egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Network Policy - Allow DNS resolution
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# Network Policy - Allow intra-namespace communication
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+---
+# Network Policy - Allow C2 services to receive external traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-c2-ingress
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  podSelector:
+    matchLabels:
+      mirqab.io/component: c2-service
+  policyTypes:
+    - Ingress
+  ingress:
+    - from: []  # Allow from anywhere (external agents)
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 8443
+---
+# Network Policy - Allow C2 services egress (for beacons)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-c2-egress
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  podSelector:
+    matchLabels:
+      mirqab.io/component: c2-service
+  policyTypes:
+    - Egress
+  egress:
+    - to: []  # Allow to anywhere (respond to agents)
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+---
+# Service Account for tenant workloads
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tenant-workload
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+automountServiceAccountToken: false
+---
+# Role for tenant workloads (minimal permissions)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant-workload-role
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["tenant-config"]
+    verbs: ["get"]
+---
+# RoleBinding for tenant service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tenant-workload-binding
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+subjects:
+  - kind: ServiceAccount
+    name: tenant-workload
+    namespace: tenant-${TENANT_ID}
+roleRef:
+  kind: Role
+  name: tenant-workload-role
+  apiGroup: rbac.authorization.k8s.io

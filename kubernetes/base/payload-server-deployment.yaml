@@ -1,0 +1,239 @@
+# Mirqab Cloud Relay - Payload Server Deployment
+# Per-tenant payload hosting with MinIO backend
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payload-server
+  namespace: tenant-${TENANT_ID}
+  labels:
+    app: payload-server
+    mirqab.io/tenant-id: "${TENANT_ID}"
+    mirqab.io/component: payload-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payload-server
+      mirqab.io/tenant-id: "${TENANT_ID}"
+  template:
+    metadata:
+      labels:
+        app: payload-server
+        mirqab.io/tenant-id: "${TENANT_ID}"
+        mirqab.io/component: payload-service
+        mirqab.io/isolated: "true"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9092"
+        prometheus.io/path: "/metrics"
+    spec:
+      runtimeClassName: gvisor
+      serviceAccountName: tenant-workload
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: payload-server
+          image: ghcr.io/mirqab/cloud-relay/payload-server:${VERSION}
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9092
+              protocol: TCP
+          env:
+            - name: TENANT_ID
+              value: "${TENANT_ID}"
+            - name: LISTEN_ADDR
+              value: ":8080"
+            - name: METRICS_PORT
+              value: "9092"
+            - name: MINIO_ENDPOINT
+              value: "minio.storage.svc.cluster.local:9000"
+            - name: MINIO_BUCKET
+              value: "tenant-${TENANT_ID}-payloads"
+            - name: MINIO_USE_SSL
+              value: "false"
+            - name: MAX_PAYLOAD_SIZE
+              value: "104857600"  # 100MB
+            - name: DEFAULT_TTL_HOURS
+              value: "24"
+            - name: MAX_DOWNLOADS_PER_URL
+              value: "100"
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: payload-server-secrets
+                  key: minio-access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: payload-server-secrets
+                  key: minio-secret-key
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: payload-server-secrets
+                  key: admin-token
+            - name: SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: payload-server-secrets
+                  key: signing-secret
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 200Mi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: payload-server
+                topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payload-server
+  namespace: tenant-${TENANT_ID}
+  labels:
+    app: payload-server
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  type: ClusterIP
+  selector:
+    app: payload-server
+    mirqab.io/tenant-id: "${TENANT_ID}"
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+    - name: metrics
+      port: 9092
+      targetPort: 9092
+      protocol: TCP
+---
+# Ingress for external payload access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: payload-server
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - "${TENANT_ID}.payload.mirqab.io"
+      secretName: payload-tls-${TENANT_ID}
+  rules:
+    - host: "${TENANT_ID}.payload.mirqab.io"
+      http:
+        paths:
+          - path: /download
+            pathType: Prefix
+            backend:
+              service:
+                name: payload-server
+                port:
+                  number: 80
+          - path: /api/v1/payloads
+            pathType: Prefix
+            backend:
+              service:
+                name: payload-server
+                port:
+                  number: 80
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payload-server
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payload-server
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payload-server
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: payload-server
+      mirqab.io/tenant-id: "${TENANT_ID}"

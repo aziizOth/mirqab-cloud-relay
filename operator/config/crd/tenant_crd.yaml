@@ -1,0 +1,210 @@
+# Mirqab Cloud Relay - Tenant Custom Resource Definition
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: tenants.mirqab.io
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+spec:
+  group: mirqab.io
+  names:
+    kind: Tenant
+    listKind: TenantList
+    plural: tenants
+    singular: tenant
+    shortNames:
+      - mrt  # mirqab tenant
+  scope: Cluster
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Tier
+          type: string
+          jsonPath: .spec.tier
+        - name: Organization
+          type: string
+          jsonPath: .spec.organizationName
+        - name: Status
+          type: string
+          jsonPath: .status.phase
+        - name: Channels
+          type: integer
+          jsonPath: .status.activeChannels
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - licenseKey
+                - organizationName
+                - tier
+                - adminEmail
+              properties:
+                licenseKey:
+                  type: string
+                  description: Valid Mirqab license key
+                  pattern: '^MIRQAB-[A-Z]{3}-[A-Z0-9]{8}-[A-Z0-9]{12}$'
+                organizationName:
+                  type: string
+                  description: Organization name
+                  minLength: 2
+                  maxLength: 100
+                tier:
+                  type: string
+                  description: Subscription tier
+                  enum:
+                    - trial
+                    - poc
+                    - starter
+                    - professional
+                    - enterprise
+                adminEmail:
+                  type: string
+                  description: Admin email for notifications
+                  format: email
+                features:
+                  type: object
+                  description: Feature flags for this tenant
+                  properties:
+                    c2Http:
+                      type: boolean
+                      default: true
+                    c2Dns:
+                      type: boolean
+                      default: false
+                    c2Smb:
+                      type: boolean
+                      default: false
+                    payloadHosting:
+                      type: boolean
+                      default: true
+                    customDomains:
+                      type: boolean
+                      default: false
+                customDomains:
+                  type: array
+                  description: Custom domains for C2 endpoints
+                  items:
+                    type: string
+                    pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                  maxItems: 10
+                resourceOverrides:
+                  type: object
+                  description: Override default resource quotas (enterprise only)
+                  properties:
+                    maxPods:
+                      type: integer
+                      minimum: 1
+                      maximum: 100
+                    cpuLimit:
+                      type: string
+                      pattern: '^[0-9]+m?$'
+                    memoryLimit:
+                      type: string
+                      pattern: '^[0-9]+(Mi|Gi)$'
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: Current phase of tenant lifecycle
+                  enum:
+                    - Pending
+                    - Provisioning
+                    - Active
+                    - Suspended
+                    - Terminating
+                    - Failed
+                conditions:
+                  type: array
+                  description: Detailed conditions for debugging
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                      - lastTransitionTime
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - LicenseValid
+                          - NamespaceReady
+                          - C2HttpReady
+                          - C2DnsReady
+                          - PayloadServerReady
+                          - CertificatesIssued
+                          - Ready
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                tenantId:
+                  type: string
+                  description: Generated tenant ID
+                namespace:
+                  type: string
+                  description: Tenant's Kubernetes namespace
+                endpoints:
+                  type: object
+                  description: Service endpoints for this tenant
+                  properties:
+                    c2Http:
+                      type: string
+                    c2Dns:
+                      type: string
+                    payloads:
+                      type: string
+                    admin:
+                      type: string
+                apiKey:
+                  type: string
+                  description: API key (stored in Secret, reference here)
+                certificateSecretRef:
+                  type: string
+                  description: Reference to Secret containing TLS certs
+                activeChannels:
+                  type: integer
+                  description: Number of active C2 channels
+                storageUsedBytes:
+                  type: integer
+                  format: int64
+                  description: Payload storage used
+                licenseExpiresAt:
+                  type: string
+                  format: date-time
+                  description: License expiration date
+                lastHealthCheck:
+                  type: string
+                  format: date-time
+                  description: Last health check timestamp
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: Last observed generation for change detection

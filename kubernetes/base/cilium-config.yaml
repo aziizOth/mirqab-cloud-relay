@@ -1,0 +1,202 @@
+# Mirqab Cloud Relay - Cilium CNI Configuration
+# Advanced eBPF-based networking with tenant isolation
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cilium-config
+  namespace: kube-system
+data:
+  # Enable eBPF-based networking
+  enable-bpf-masquerade: "true"
+  enable-ipv4-masquerade: "true"
+
+  # Enable identity-based security
+  enable-policy: "always"
+  policy-enforcement: "always"
+
+  # Enable endpoint health checking
+  enable-endpoint-health-checking: "true"
+
+  # Enable Hubble observability
+  enable-hubble: "true"
+  hubble-listen-address: ":4244"
+  hubble-metrics-server: ":9091"
+  hubble-metrics:
+    - dns:query;ignoreAAAA
+    - drop
+    - tcp
+    - flow
+    - icmp
+    - http
+
+  # Enable encryption for pod-to-pod traffic
+  enable-ipsec: "false"  # Use WireGuard instead
+  enable-wireguard: "true"
+
+  # Bandwidth management
+  enable-bandwidth-manager: "true"
+
+  # Host firewall
+  enable-host-firewall: "true"
+
+  # Enable cluster mesh for multi-cluster (future)
+  cluster-name: "mirqab-cloud-relay"
+
+  # Tunnel mode for cross-node communication
+  tunnel: "vxlan"
+
+  # Enable DSR for better performance
+  enable-node-port: "true"
+
+  # Identity allocation mode
+  identity-allocation-mode: "crd"
+
+  # Disable legacy iptables
+  install-iptables-rules: "false"
+
+  # IPAM mode
+  ipam: "cluster-pool"
+  cluster-pool-ipv4-cidr: "10.10.0.0/16"
+  cluster-pool-ipv4-mask-size: "24"
+
+  # Enable L7 proxy for HTTP policies
+  enable-l7-proxy: "true"
+
+  # Prometheus metrics
+  prometheus-serve-addr: ":9090"
+  operator-prometheus-serve-addr: ":6942"
+---
+# Cilium Network Policy for tenant isolation
+# Applied globally to enforce tenant boundaries
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: tenant-isolation
+spec:
+  description: "Enforce strict tenant isolation - pods can only communicate within their tenant namespace"
+  endpointSelector:
+    matchLabels:
+      mirqab.io/isolated: "true"
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: ${POD_NAMESPACE}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: ${POD_NAMESPACE}
+    # Allow DNS
+    - toEndpoints:
+        - matchLabels:
+            k8s-app: kube-dns
+            io.kubernetes.pod.namespace: kube-system
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+---
+# Cilium Network Policy for C2 services
+# Allows external ingress for simulated C2 traffic
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: c2-http-ingress-template
+  namespace: tenant-TEMPLATE
+spec:
+  description: "Allow HTTP/HTTPS ingress for C2 simulator"
+  endpointSelector:
+    matchLabels:
+      app: c2-http
+  ingress:
+    - fromEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "8443"
+              protocol: TCP
+          rules:
+            http:
+              - method: "GET"
+              - method: "POST"
+              - method: "PUT"
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "80"
+              protocol: TCP
+---
+# Cilium Network Policy for DNS C2
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: c2-dns-ingress-template
+  namespace: tenant-TEMPLATE
+spec:
+  description: "Allow DNS traffic for C2 DNS tunneling simulator"
+  endpointSelector:
+    matchLabels:
+      app: c2-dns
+  ingress:
+    - fromEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+---
+# Hubble UI deployment for observability
+apiVersion: v1
+kind: Service
+metadata:
+  name: hubble-ui
+  namespace: kube-system
+  labels:
+    k8s-app: hubble-ui
+spec:
+  type: ClusterIP
+  selector:
+    k8s-app: hubble-ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8081
+---
+# Rate limiting for tenant traffic
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: tenant-rate-limit
+spec:
+  description: "Rate limit tenant traffic to prevent abuse"
+  endpointSelector:
+    matchLabels:
+      mirqab.io/rate-limited: "true"
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+          # Rate limit: 100 requests per second per endpoint
+          # Note: Actual rate limiting requires Envoy proxy

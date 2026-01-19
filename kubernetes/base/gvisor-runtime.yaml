@@ -1,0 +1,215 @@
+# Mirqab Cloud Relay - gVisor Runtime Configuration
+# Sandboxed container runtime for enhanced security
+
+---
+# RuntimeClass for gVisor (runsc)
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+  labels:
+    app.kubernetes.io/managed-by: mirqab-cloud-relay
+handler: runsc
+scheduling:
+  nodeSelector:
+    mirqab.io/gvisor: "enabled"
+  tolerations:
+    - key: "mirqab.io/gvisor"
+      operator: "Equal"
+      value: "true"
+      effect: "NoSchedule"
+---
+# RuntimeClass for gVisor with network isolation
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor-isolated
+  labels:
+    app.kubernetes.io/managed-by: mirqab-cloud-relay
+handler: runsc-isolated
+scheduling:
+  nodeSelector:
+    mirqab.io/gvisor: "enabled"
+    mirqab.io/isolated: "true"
+---
+# DaemonSet to install gVisor on nodes
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gvisor-installer
+  namespace: kube-system
+  labels:
+    app: gvisor-installer
+    app.kubernetes.io/managed-by: mirqab-cloud-relay
+spec:
+  selector:
+    matchLabels:
+      app: gvisor-installer
+  template:
+    metadata:
+      labels:
+        app: gvisor-installer
+    spec:
+      nodeSelector:
+        mirqab.io/gvisor: "enabled"
+      hostPID: true
+      hostNetwork: true
+      initContainers:
+        - name: gvisor-installer
+          image: gcr.io/gvisor-prerelease/gvisor-containerd-shim:latest
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: containerd-config
+              mountPath: /etc/containerd
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -ex
+
+              # Copy runsc binary
+              cp /usr/local/bin/runsc /host/usr/local/bin/runsc
+              chmod +x /host/usr/local/bin/runsc
+
+              # Copy containerd-shim-runsc-v1
+              cp /usr/local/bin/containerd-shim-runsc-v1 /host/usr/local/bin/containerd-shim-runsc-v1
+              chmod +x /host/usr/local/bin/containerd-shim-runsc-v1
+
+              # Create gVisor configuration
+              cat > /host/etc/containerd/runsc.toml << 'EOF'
+              [runsc_config]
+                platform = "systrap"
+                network = "host"
+                debug = false
+                debug-log = "/var/log/runsc/"
+                root = "/run/containerd/runsc"
+                log-format = "json"
+
+              [runsc_config.flags]
+                strace = false
+                watchdog-action = "panic"
+              EOF
+
+              # Create isolated gVisor configuration
+              cat > /host/etc/containerd/runsc-isolated.toml << 'EOF'
+              [runsc_config]
+                platform = "systrap"
+                network = "sandbox"
+                debug = false
+                debug-log = "/var/log/runsc/"
+                root = "/run/containerd/runsc-isolated"
+                log-format = "json"
+
+              [runsc_config.flags]
+                strace = false
+                watchdog-action = "panic"
+                network-sandbox = true
+              EOF
+
+              # Signal that installation is complete
+              touch /host/var/run/gvisor-installed
+
+              echo "gVisor installation complete"
+      containers:
+        - name: pause
+          image: gcr.io/google_containers/pause:3.9
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 10m
+              memory: 16Mi
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+        - name: containerd-config
+          hostPath:
+            path: /etc/containerd
+---
+# ConfigMap for gVisor runtime configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gvisor-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/managed-by: mirqab-cloud-relay
+data:
+  # Default configuration for tenant workloads
+  pod-init.yaml: |
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/app: runtime/default
+        seccomp.security.alpha.kubernetes.io/pod: runtime/default
+    spec:
+      runtimeClassName: gvisor
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+  # Isolated configuration for high-risk workloads
+  pod-init-isolated.yaml: |
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/app: runtime/default
+    spec:
+      runtimeClassName: gvisor-isolated
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+---
+# PodSecurityPolicy alternative using Pod Security Admission
+# Labels applied to tenant namespaces
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-psa-labels
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/managed-by: mirqab-cloud-relay
+data:
+  # These labels are applied to tenant namespaces
+  restricted-labels: |
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

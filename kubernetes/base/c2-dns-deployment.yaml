@@ -1,0 +1,204 @@
+# Mirqab Cloud Relay - C2 DNS Simulator Deployment
+# Template for per-tenant deployment
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c2-dns
+  namespace: tenant-${TENANT_ID}
+  labels:
+    app: c2-dns
+    mirqab.io/tenant-id: "${TENANT_ID}"
+    mirqab.io/component: c2-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: c2-dns
+      mirqab.io/tenant-id: "${TENANT_ID}"
+  template:
+    metadata:
+      labels:
+        app: c2-dns
+        mirqab.io/tenant-id: "${TENANT_ID}"
+        mirqab.io/component: c2-service
+        mirqab.io/isolated: "true"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+    spec:
+      runtimeClassName: gvisor
+      serviceAccountName: tenant-workload
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: c2-dns
+          image: ghcr.io/mirqab/cloud-relay/c2-dns:${VERSION}
+          imagePullPolicy: Always
+          ports:
+            - name: dns-udp
+              containerPort: 5353
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 5353
+              protocol: TCP
+            - name: metrics
+              containerPort: 9091
+              protocol: TCP
+          env:
+            - name: TENANT_ID
+              value: "${TENANT_ID}"
+            - name: DNS_PORT
+              value: "5353"
+            - name: METRICS_PORT
+              value: "9091"
+            - name: BASE_DOMAIN
+              value: "${TENANT_ID}.c2.mirqab.io"
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: c2-dns-secrets
+                  key: admin-token
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: c2-dns-secrets
+                  key: redis-url
+                  optional: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9091
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9091
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 50Mi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: c2-dns
+                topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: c2-dns
+  namespace: tenant-${TENANT_ID}
+  labels:
+    app: c2-dns
+    mirqab.io/tenant-id: "${TENANT_ID}"
+  annotations:
+    # Enable external-dns for automatic DNS registration
+    external-dns.alpha.kubernetes.io/hostname: "${TENANT_ID}.c2.mirqab.io"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: c2-dns
+    mirqab.io/tenant-id: "${TENANT_ID}"
+  ports:
+    - name: dns-udp
+      port: 53
+      targetPort: 5353
+      protocol: UDP
+    - name: dns-tcp
+      port: 53
+      targetPort: 5353
+      protocol: TCP
+---
+# Internal metrics service
+apiVersion: v1
+kind: Service
+metadata:
+  name: c2-dns-metrics
+  namespace: tenant-${TENANT_ID}
+  labels:
+    app: c2-dns
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  type: ClusterIP
+  selector:
+    app: c2-dns
+    mirqab.io/tenant-id: "${TENANT_ID}"
+  ports:
+    - name: metrics
+      port: 9091
+      targetPort: 9091
+      protocol: TCP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: c2-dns
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: c2-dns
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: c2-dns
+  namespace: tenant-${TENANT_ID}
+  labels:
+    mirqab.io/tenant-id: "${TENANT_ID}"
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: c2-dns
+      mirqab.io/tenant-id: "${TENANT_ID}"

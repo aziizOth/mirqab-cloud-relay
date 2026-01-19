@@ -1,0 +1,134 @@
+{{- if .Values.exfilServer.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-exfil
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: exfil-server
+spec:
+  replicas: {{ .Values.exfilServer.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cloud-relay.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: exfil-server
+  template:
+    metadata:
+      labels:
+        {{- include "cloud-relay.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: exfil-server
+    spec:
+      serviceAccountName: {{ include "cloud-relay.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: exfil-server
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.exfilServer.image.repository }}:{{ .Values.exfilServer.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: dns
+              containerPort: 5353
+              protocol: UDP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: ENVIRONMENT
+              value: {{ .Values.global.environment }}
+            - name: DOMAIN
+              value: {{ .Values.domain }}
+            - name: LOG_LEVEL
+              value: {{ .Values.logging.level }}
+            # Exfil channels configuration
+            - name: ENABLE_HTTP_EXFIL
+              value: {{ .Values.exfilServer.channels.http | quote }}
+            - name: ENABLE_DNS_EXFIL
+              value: {{ .Values.exfilServer.channels.dns | quote }}
+            - name: ENABLE_ICMP_EXFIL
+              value: {{ .Values.exfilServer.channels.icmp | quote }}
+            # Storage configuration
+            - name: STORAGE_BUCKET
+              value: {{ .Values.storage.bucket }}
+            - name: STORAGE_PREFIX
+              value: "exfil/"
+            # Database
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: host
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: port
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: database
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: password
+          volumeMounts:
+            - name: exfil-storage
+              mountPath: /data/exfil
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.exfilServer.resources | nindent 12 }}
+      volumes:
+        - name: exfil-storage
+          emptyDir:
+            sizeLimit: {{ .Values.exfilServer.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cloud-relay.fullname" . }}-exfil
+  labels:
+    {{- include "cloud-relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: exfil-server
+spec:
+  type: ClusterIP
+  ports:
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+    - port: 53
+      targetPort: dns
+      protocol: UDP
+      name: dns
+    - port: 9090
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "cloud-relay.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: exfil-server
+{{- end }}

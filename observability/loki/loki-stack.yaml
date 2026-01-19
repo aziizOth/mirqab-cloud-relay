@@ -1,0 +1,233 @@
+# Mirqab Cloud Relay - Loki Stack for Log Aggregation
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logging
+  labels:
+    app.kubernetes.io/name: logging
+---
+# Loki configuration values for grafana/loki-stack Helm chart
+# Install: helm install loki grafana/loki-stack -n logging -f loki-stack.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-helm-values
+  namespace: logging
+data:
+  values.yaml: |
+    # Loki configuration
+    loki:
+      enabled: true
+
+      # Loki configuration
+      config:
+        auth_enabled: false
+
+        server:
+          http_listen_port: 3100
+          grpc_listen_port: 9096
+
+        common:
+          path_prefix: /loki
+          storage:
+            filesystem:
+              chunks_directory: /loki/chunks
+              rules_directory: /loki/rules
+          replication_factor: 1
+          ring:
+            kvstore:
+              store: inmemory
+
+        schema_config:
+          configs:
+            - from: 2024-01-01
+              store: boltdb-shipper
+              object_store: s3
+              schema: v12
+              index:
+                prefix: index_
+                period: 24h
+
+        storage_config:
+          boltdb_shipper:
+            active_index_directory: /loki/boltdb-shipper-active
+            cache_location: /loki/boltdb-shipper-cache
+            cache_ttl: 24h
+            shared_store: s3
+          aws:
+            s3: s3://us-east-1/mirqab-loki-logs
+            s3forcepathstyle: false
+
+        compactor:
+          working_directory: /loki/compactor
+          shared_store: s3
+
+        limits_config:
+          enforce_metric_name: false
+          reject_old_samples: true
+          reject_old_samples_max_age: 168h
+          max_cache_freshness_per_query: 10m
+          split_queries_by_interval: 15m
+          # Per-tenant limits
+          ingestion_rate_mb: 10
+          ingestion_burst_size_mb: 20
+          max_entries_limit_per_query: 5000
+
+        # Table manager for retention
+        table_manager:
+          retention_deletes_enabled: true
+          retention_period: 720h  # 30 days
+
+      # Resources
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
+
+      # Persistence
+      persistence:
+        enabled: true
+        storageClassName: gp3
+        size: 50Gi
+
+    # Promtail for log collection
+    promtail:
+      enabled: true
+
+      config:
+        clients:
+          - url: http://loki:3100/loki/api/v1/push
+
+        positions:
+          filename: /run/promtail/positions.yaml
+
+        scrape_configs:
+          # Kubernetes pod logs
+          - job_name: kubernetes-pods
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              # Only keep Mirqab tenant logs
+              - source_labels: [__meta_kubernetes_namespace]
+                regex: tenant-.*
+                action: keep
+
+              # Extract tenant ID
+              - source_labels: [__meta_kubernetes_pod_label_mirqab_io_tenant_id]
+                target_label: tenant_id
+
+              # Extract component
+              - source_labels: [__meta_kubernetes_pod_label_mirqab_io_component]
+                target_label: component
+
+              # Standard labels
+              - source_labels: [__meta_kubernetes_namespace]
+                target_label: namespace
+              - source_labels: [__meta_kubernetes_pod_name]
+                target_label: pod
+              - source_labels: [__meta_kubernetes_pod_container_name]
+                target_label: container
+
+            pipeline_stages:
+              # Parse JSON logs from C2 services
+              - json:
+                  expressions:
+                    level: level
+                    msg: msg
+                    tenant_id: tenant_id
+                    session_id: session_id
+                    agent_id: agent_id
+
+              # Add labels from parsed JSON
+              - labels:
+                  level:
+                  session_id:
+                  agent_id:
+
+              # Mask sensitive data
+              - replace:
+                  expression: '(api[_-]?key["\s:=]+)[A-Za-z0-9_-]+'
+                  replace: '${1}[REDACTED]'
+              - replace:
+                  expression: '(password["\s:=]+)[^\s"]+'
+                  replace: '${1}[REDACTED]'
+
+          # System namespace logs
+          - job_name: mirqab-system
+            kubernetes_sd_configs:
+              - role: pod
+                namespaces:
+                  names:
+                    - mirqab-system
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_namespace]
+                target_label: namespace
+              - source_labels: [__meta_kubernetes_pod_name]
+                target_label: pod
+              - source_labels: [__meta_kubernetes_pod_container_name]
+                target_label: container
+              - action: labelmap
+                regex: __meta_kubernetes_pod_label_(.+)
+
+      # Promtail resources
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+      # Security context
+      securityContext:
+        readOnlyRootFilesystem: true
+        runAsUser: 0
+        runAsGroup: 0
+
+      # Volume mounts for container logs
+      extraVolumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: containers
+          hostPath:
+            path: /var/lib/docker/containers
+
+      extraVolumeMounts:
+        - name: varlog
+          mountPath: /var/log
+          readOnly: true
+        - name: containers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+
+    # Grafana integration handled by prometheus-stack
+    grafana:
+      enabled: false
+---
+# LogQL Recording Rules for common queries
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-recording-rules
+  namespace: logging
+data:
+  rules.yaml: |
+    groups:
+      - name: mirqab_log_rules
+        rules:
+          # Error rate by tenant
+          - record: mirqab:log_errors:rate5m
+            expr: sum by (tenant_id) (rate({job="kubernetes-pods"} |= "error" [5m]))
+
+          # Beacon activity by tenant
+          - record: mirqab:beacon_logs:rate5m
+            expr: sum by (tenant_id) (rate({job="kubernetes-pods", component="c2-service"} |~ "beacon" [5m]))
+
+          # Payload download rate
+          - record: mirqab:payload_downloads:rate5m
+            expr: sum by (tenant_id) (rate({job="kubernetes-pods", component="payload-service"} |= "download" [5m]))

@@ -1,0 +1,35 @@
+# Prometheus Configuration for Cloud Relay
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'api-gateway'
+    static_configs:
+      - targets: ['api-gateway:9090']
+    metrics_path: /metrics
+
+  - job_name: 'c2-simulator'
+    static_configs:
+      - targets: ['c2-simulator:9090']
+    metrics_path: /metrics
+
+  - job_name: 'exfil-server'
+    static_configs:
+      - targets: ['exfil-server:9090']
+    metrics_path: /metrics
+
+  - job_name: 'phishing-server'
+    static_configs:
+      - targets: ['phishing-server:9090']
+    metrics_path: /metrics
+
+  - job_name: 'payload-hosting'
+    static_configs:
+      - targets: ['payload-hosting:9090']
+    metrics_path: /metrics
+
+  - job_name: 'waf-tester'
+    static_configs:
+      - targets: ['waf-tester:9090']
+    metrics_path: /metrics

@@ -1,0 +1,120 @@
+# Mirqab Cloud Relay - Operator RBAC
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mirqab-operator
+  namespace: mirqab-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mirqab-operator-role
+rules:
+  # Tenant CRD management
+  - apiGroups: ["mirqab.io"]
+    resources: ["tenants"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["mirqab.io"]
+    resources: ["tenants/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["mirqab.io"]
+    resources: ["tenants/finalizers"]
+    verbs: ["update"]
+
+  # Namespace management
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+
+  # Core resources in tenant namespaces
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "services", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Workload resources
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Networking
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
+
+  # Certificate management
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers", "clusterissuers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Events for debugging
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+  # Pod status for health checks
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Metrics
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mirqab-operator-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mirqab-operator-role
+subjects:
+  - kind: ServiceAccount
+    name: mirqab-operator
+    namespace: mirqab-system
+---
+# Leader election role for HA
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mirqab-operator-leader-election
+  namespace: mirqab-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mirqab-operator-leader-election-rolebinding
+  namespace: mirqab-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mirqab-operator-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: mirqab-operator
+    namespace: mirqab-system
