@@ -8,7 +8,7 @@ Implements long-polling with exponential backoff for efficient task retrieval.
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable, Awaitable
 from enum import Enum
 
@@ -208,7 +208,7 @@ class TaskPoller:
         try:
             # Claim the task
             await self.client.claim_task(task.task_id)
-            task.claimed_at = datetime.utcnow()
+            task.claimed_at = datetime.now(timezone.utc)
             logger.info(f"Claimed task {task.task_id} ({task.attack_name})")
 
             # Execute in background

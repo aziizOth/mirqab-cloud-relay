@@ -8,7 +8,7 @@ import os
 import ssl
 import uuid
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, List
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -239,7 +239,7 @@ async def test_payload(
         "latency_ms": None,
     }
 
-    start_time = datetime.utcnow()
+    start_time = datetime.now(timezone.utc)
 
     try:
         # Test in different injection points
@@ -252,7 +252,7 @@ async def test_payload(
                 timeout=timeout,
             )
 
-        latency = (datetime.utcnow() - start_time).total_seconds() * 1000
+        latency = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
         result["latency_ms"] = latency
         result["status_code"] = response.status_code
         result["response_length"] = len(response.content)
@@ -294,7 +294,7 @@ async def run_scan(scan_config: ScanConfig):
     scan = ScanResult(
         scan_id=scan_config.scan_id,
         target_url=scan_config.target_url,
-        started_at=datetime.utcnow(),
+        started_at=datetime.now(timezone.utc),
     )
     scans[scan.scan_id] = scan
     ACTIVE_SCANS.set(len([s for s in scans.values() if s.status == "running"]))
@@ -340,7 +340,7 @@ async def run_scan(scan_config: ScanConfig):
     if scan.total_tests > 0:
         scan.effectiveness_score = (scan.blocked / scan.total_tests) * 100
 
-    scan.completed_at = datetime.utcnow()
+    scan.completed_at = datetime.now(timezone.utc)
     scan.status = "completed"
     ACTIVE_SCANS.set(len([s for s in scans.values() if s.status == "running"]))
 

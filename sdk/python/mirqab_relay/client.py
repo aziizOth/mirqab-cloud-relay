@@ -11,7 +11,7 @@ import ssl
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Callable, BinaryIO
 from urllib.parse import urljoin
 
@@ -608,7 +608,7 @@ class CloudRelayClient:
         }
 
         data = self._request("POST", "/api/v1/heartbeat", json=payload)
-        self._last_heartbeat = datetime.utcnow()
+        self._last_heartbeat = datetime.now(timezone.utc)
         return data
 
     def start_heartbeat(

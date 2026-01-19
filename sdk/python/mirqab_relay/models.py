@@ -4,7 +4,7 @@ Data classes for Cloud Relay client operations
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, Any
 import json
@@ -99,7 +99,7 @@ class RelayCredentials:
     @property
     def is_expired(self) -> bool:
         """Check if credentials have expired"""
-        return datetime.utcnow() > self.expires_at.replace(tzinfo=None)
+        return datetime.now(timezone.utc) > self.expires_at.replace(tzinfo=timezone.utc)
 
 
 @dataclass
@@ -216,7 +216,7 @@ class BeaconSession:
     def is_active(self) -> bool:
         """Check if session is still active based on last beacon"""
         timeout = self.beacon_interval * (1 + self.jitter / 100) * 3
-        return (datetime.utcnow() - self.last_seen.replace(tzinfo=None)).total_seconds() < timeout
+        return (datetime.now(timezone.utc) - self.last_seen.replace(tzinfo=timezone.utc)).total_seconds() < timeout
 
 
 @dataclass

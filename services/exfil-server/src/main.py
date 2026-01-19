@@ -10,7 +10,7 @@ import uuid
 import base64
 import hashlib
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, List
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -249,7 +249,7 @@ async def upload_chunk(chunk: ChunkData):
         data = base64.b64decode(chunk.data)
         session_data[chunk.session_id] += data
         session.received_chunks += 1
-        session.last_activity = datetime.utcnow()
+        session.last_activity = datetime.now(timezone.utc)
 
         EXFIL_BYTES.labels(channel=ExfilChannel.HTTP_CHUNKED.value).inc(len(data))
 

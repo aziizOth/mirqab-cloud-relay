@@ -17,7 +17,7 @@ import struct
 import dns.resolver
 import dns.message
 import dns.query
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from dataclasses import dataclass
 
@@ -150,7 +150,7 @@ class HTTPCallbackSimulator:
                 json={
                     "agent_id": agent_id,
                     "execution_id": execution_id,
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "data": data,
                 },
                 headers={"Content-Type": "application/json"},

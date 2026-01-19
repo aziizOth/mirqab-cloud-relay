@@ -13,7 +13,7 @@ import asyncio
 import pytest
 import httpx
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from pathlib import Path
 
@@ -100,13 +100,13 @@ class CloudRelayClient:
         poll_interval: int = 5,
     ) -> dict:
         """Wait for WAF test to complete."""
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         while True:
             result = await self.get_waf_test_result(test_id)
             if result.get("status") in ("completed", "failed"):
                 return result
 
-            elapsed = (datetime.utcnow() - start_time).total_seconds()
+            elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
             if elapsed > timeout_seconds:
                 raise TimeoutError(f"WAF test {test_id} did not complete within {timeout_seconds}s")
 
@@ -234,7 +234,7 @@ async def test_waf_comprehensive(cloud_relay_client: CloudRelayClient):
     # Generate report
     report = {
         "test_id": test_id,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "target_domain": "test.waf.example.com",
         "total_payloads": result["total_payloads"],
         "blocked_count": result["blocked_count"],

@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 import json
 
@@ -212,7 +212,7 @@ class MTLSClient:
     async def health_check(self) -> dict:
         """Check Master server health."""
         result = await self._request("GET", "/api/v1/health")
-        self._last_health_check = datetime.utcnow()
+        self._last_health_check = datetime.now(timezone.utc)
         return result
 
     # ==========================================================================

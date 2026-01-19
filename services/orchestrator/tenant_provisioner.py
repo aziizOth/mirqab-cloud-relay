@@ -9,7 +9,7 @@ import base64
 import hashlib
 import secrets
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, List, Any
 from dataclasses import dataclass, asdict
 from enum import Enum
@@ -144,8 +144,8 @@ class CertificateAuthority:
             .issuer_name(issuer)
             .public_key(self.ca_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.utcnow())
-            .not_valid_after(datetime.utcnow() + timedelta(days=3650))
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=3650))
             .add_extension(
                 x509.BasicConstraints(ca=True, path_length=0),
                 critical=True,
@@ -193,8 +193,8 @@ class CertificateAuthority:
             .issuer_name(self.ca_cert.subject)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.utcnow())
-            .not_valid_after(datetime.utcnow() + timedelta(days=365))
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
             .add_extension(
                 x509.SubjectAlternativeName(san_list),
                 critical=False,
@@ -742,7 +742,7 @@ class TenantProvisioningService:
             TenantCredentials with all connection details
         """
         tenant_id = self.generate_tenant_id(organization_name)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         config = TenantConfig(
             tenant_id=tenant_id,
