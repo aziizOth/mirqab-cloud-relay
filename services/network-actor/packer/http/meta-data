@@ -1,0 +1,3 @@
+# Empty meta-data file required for cloud-init
+instance-id: mirqab-network-actor
+local-hostname: mirqab-network-actor

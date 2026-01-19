@@ -1,0 +1,4 @@
+# Mirqab Network Actor Dependencies
+httpx>=0.26.0
+aiofiles>=23.2.0
+structlog>=24.1.0

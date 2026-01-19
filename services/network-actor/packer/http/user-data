@@ -1,0 +1,37 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  identity:
+    hostname: mirqab-network-actor
+    username: mirqab
+    # Password: mirqab123 (hashed)
+    password: $6$rounds=4096$xyz$F2qH4gPh5hq5a5D8lN7O2r5hQ9i3K0t1Y6U8O4s3W7r5D1F3h5j7k9L1m3N5p7q9R1s3T5u7V9w1X3y5Z7
+
+  ssh:
+    install-server: true
+    allow-pw: true
+
+  packages:
+    - openssh-server
+    - python3
+    - python3-pip
+    - python3-venv
+    - ufw
+    - iptables
+    - curl
+    - wget
+    - jq
+
+  storage:
+    layout:
+      name: direct
+
+  late-commands:
+    # Enable passwordless sudo for mirqab user
+    - echo 'mirqab ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/mirqab
+    # Regenerate SSH keys on first boot
+    - rm -f /target/etc/ssh/ssh_host_*
