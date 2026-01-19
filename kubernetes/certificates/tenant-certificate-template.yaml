@@ -1,0 +1,45 @@
+# Mirqab Cloud Relay - Tenant Certificate Template
+# This is dynamically applied per-tenant by the operator
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tenant-mtls-cert
+  namespace: {{ .Namespace }}
+  labels:
+    mirqab.io/tenant-id: "{{ .TenantID }}"
+    mirqab.io/component: mtls
+spec:
+  secretName: tenant-mtls-secret
+  duration: 2160h  # 90 days
+  renewBefore: 360h  # 15 days
+  subject:
+    organizations:
+      - "{{ .OrganizationName }}"
+    organizationalUnits:
+      - Cloud Relay Client
+  commonName: "{{ .TenantID }}.tenant.mirqab.io"
+  usages:
+    - client auth
+    - key encipherment
+    - digital signature
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: mirqab-mtls-issuer
+    kind: Issuer
+    group: cert-manager.io
+
+---
+# ConfigMap with CA certificate for tenant to verify Master
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mirqab-ca-bundle
+  namespace: {{ .Namespace }}
+  labels:
+    mirqab.io/tenant-id: "{{ .TenantID }}"
+data:
+  ca.crt: |
+    {{ .CACertificate }}

@@ -1,0 +1,148 @@
+# Mirqab Cloud Relay - mTLS Certificate Configuration
+# Requires cert-manager to be installed in the cluster
+---
+# Internal CA for mTLS client certificates
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: mirqab-internal-ca
+spec:
+  selfSigned: {}
+
+---
+# Root CA Certificate for mTLS
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mirqab-mtls-ca
+  namespace: mirqab-system
+spec:
+  isCA: true
+  commonName: mirqab-mtls-ca
+  secretName: mirqab-mtls-ca-secret
+  duration: 87600h  # 10 years
+  renewBefore: 8760h  # 1 year
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - server auth
+    - client auth
+    - cert sign
+    - crl sign
+  issuerRef:
+    name: mirqab-internal-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+---
+# CA Issuer using the root CA certificate
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: mirqab-mtls-issuer
+  namespace: mirqab-system
+spec:
+  ca:
+    secretName: mirqab-mtls-ca-secret
+
+---
+# Server certificate for Cloud Relay API Gateway
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cloud-relay-server-cert
+  namespace: mirqab-system
+spec:
+  secretName: cloud-relay-server-tls
+  duration: 8760h  # 1 year
+  renewBefore: 720h  # 30 days
+  subject:
+    organizations:
+      - Mirqab
+  commonName: cloud-relay.mirqab.io
+  dnsNames:
+    - cloud-relay.mirqab.io
+    - api.relay.mirqab.io
+    - "*.relay.mirqab.io"
+    - cloud-relay-api-gateway.mirqab-system.svc
+    - cloud-relay-api-gateway.mirqab-system.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - server auth
+    - key encipherment
+    - digital signature
+  issuerRef:
+    name: mirqab-mtls-issuer
+    kind: Issuer
+    group: cert-manager.io
+
+---
+# Client certificate template for tenants
+# Each tenant gets a certificate issued from this template
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tenant-client-cert-template
+  namespace: mirqab-system
+  annotations:
+    description: "Template for tenant mTLS client certificates"
+spec:
+  secretName: tenant-client-cert-template-secret
+  duration: 2160h  # 90 days
+  renewBefore: 360h  # 15 days
+  subject:
+    organizations:
+      - Mirqab Tenant
+  commonName: tenant-template.mirqab.io
+  usages:
+    - client auth
+    - key encipherment
+    - digital signature
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: mirqab-mtls-issuer
+    kind: Issuer
+    group: cert-manager.io
+
+---
+# LetsEncrypt ClusterIssuer for public-facing ingress certificates
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@mirqab.io
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+        selector:
+          dnsZones:
+            - "mirqab.io"
+            - "relay.mirqab.io"
+
+---
+# LetsEncrypt Staging for testing
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: admin@mirqab.io
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx

@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -25,6 +27,13 @@ import (
 
 	mirqabv1 "mirqab-cloud-relay/operator/pkg/apis/mirqab/v1"
 )
+
+// cert-manager Certificate GVK
+var certificateGVK = schema.GroupVersionKind{
+	Group:   "cert-manager.io",
+	Version: "v1",
+	Kind:    "Certificate",
+}
 
 const (
 	tenantFinalizer   = "mirqab.io/tenant-finalizer"
@@ -121,6 +130,12 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, err
 	}
 
+	// Provision mTLS client certificate
+	if err := r.reconcileMTLSCertificate(ctx, tenant); err != nil {
+		logger.Error(err, "Failed to reconcile mTLS certificate")
+		return ctrl.Result{}, err
+	}
+
 	// Provision network policies
 	if err := r.reconcileNetworkPolicies(ctx, tenant); err != nil {
 		logger.Error(err, "Failed to reconcile network policies")
@@ -149,6 +164,12 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			logger.Error(err, "Failed to reconcile payload server")
 			return ctrl.Result{}, err
 		}
+	}
+
+	// Provision Ingress resources
+	if err := r.reconcileIngress(ctx, tenant); err != nil {
+		logger.Error(err, "Failed to reconcile ingress")
+		return ctrl.Result{}, err
 	}
 
 	// Update endpoints
@@ -292,6 +313,7 @@ func (r *TenantReconciler) allConditionsReady(tenant *mirqabv1.Tenant) bool {
 		mirqabv1.ConditionLicenseValid,
 		mirqabv1.ConditionNamespaceReady,
 		mirqabv1.ConditionC2HttpReady,
+		mirqabv1.ConditionCertificatesReady,
 	}
 
 	for _, ct := range required {
@@ -388,6 +410,85 @@ func (r *TenantReconciler) reconcileSecrets(ctx context.Context, tenant *mirqabv
 	}
 
 	tenant.Status.CertificateSecretRef = "tenant-credentials"
+	return nil
+}
+
+// reconcileMTLSCertificate creates mTLS client certificate for tenant
+func (r *TenantReconciler) reconcileMTLSCertificate(ctx context.Context, tenant *mirqabv1.Tenant) error {
+	// Create cert-manager Certificate using unstructured to avoid importing cert-manager types
+	cert := &unstructured.Unstructured{}
+	cert.SetGroupVersionKind(certificateGVK)
+	cert.SetName("tenant-mtls-cert")
+	cert.SetNamespace(tenant.Status.Namespace)
+	cert.SetLabels(map[string]string{
+		"mirqab.io/tenant-id": tenant.Status.TenantID,
+		"mirqab.io/component": "mtls",
+	})
+
+	// Calculate certificate duration based on tier
+	duration := "2160h" // 90 days default
+	renewBefore := "360h" // 15 days
+	if tenant.Spec.Tier == mirqabv1.TierEnterprise {
+		duration = "8760h" // 1 year for enterprise
+		renewBefore = "720h" // 30 days
+	}
+
+	// Set the spec
+	cert.Object["spec"] = map[string]interface{}{
+		"secretName":  "tenant-mtls-secret",
+		"duration":    duration,
+		"renewBefore": renewBefore,
+		"subject": map[string]interface{}{
+			"organizations":       []string{tenant.Spec.OrganizationName},
+			"organizationalUnits": []string{"Cloud Relay Client"},
+		},
+		"commonName": fmt.Sprintf("%s.tenant.mirqab.io", tenant.Status.TenantID),
+		"usages": []string{
+			"client auth",
+			"key encipherment",
+			"digital signature",
+		},
+		"privateKey": map[string]interface{}{
+			"algorithm": "ECDSA",
+			"size":      256,
+		},
+		"issuerRef": map[string]interface{}{
+			"name":  "mirqab-mtls-issuer",
+			"kind":  "Issuer",
+			"group": "cert-manager.io",
+		},
+	}
+
+	// Create the certificate
+	if err := r.Create(ctx, cert); err != nil {
+		if !errors.IsAlreadyExists(err) {
+			return err
+		}
+	}
+
+	// Create ConfigMap with CA bundle for tenant to verify Master
+	caBundle := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mirqab-ca-bundle",
+			Namespace: tenant.Status.Namespace,
+			Labels: map[string]string{
+				"mirqab.io/tenant-id": tenant.Status.TenantID,
+			},
+		},
+		Data: map[string]string{
+			"master-url": fmt.Sprintf("https://api.%s", baseDomain),
+			"ca-issuer":  "mirqab-mtls-issuer",
+		},
+	}
+
+	if err := r.Create(ctx, caBundle); err != nil {
+		if !errors.IsAlreadyExists(err) {
+			return err
+		}
+	}
+
+	// Update status with certificate reference
+	tenant.Status.CertificateSecretRef = "tenant-mtls-secret"
 	return nil
 }
 
@@ -823,6 +924,159 @@ func (r *TenantReconciler) reconcilePayloadServer(ctx context.Context, tenant *m
 	return nil
 }
 
+// reconcileIngress creates Ingress resources for tenant services
+func (r *TenantReconciler) reconcileIngress(ctx context.Context, tenant *mirqabv1.Tenant) error {
+	labels := map[string]string{
+		"mirqab.io/tenant-id": tenant.Status.TenantID,
+		"mirqab.io/component": "ingress",
+	}
+
+	// C2 HTTP Ingress
+	c2HttpHost := fmt.Sprintf("c2-http.%s.%s", tenant.Status.TenantID, baseDomain)
+	pathType := networkingv1.PathTypePrefix
+
+	c2HttpIngress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "c2-http-ingress",
+			Namespace: tenant.Status.Namespace,
+			Labels:    labels,
+			Annotations: map[string]string{
+				"kubernetes.io/ingress.class":                  "nginx",
+				"nginx.ingress.kubernetes.io/ssl-redirect":     "true",
+				"nginx.ingress.kubernetes.io/backend-protocol": "HTTP",
+				"nginx.ingress.kubernetes.io/proxy-body-size":  "50m",
+				"cert-manager.io/cluster-issuer":               "letsencrypt-prod",
+			},
+		},
+		Spec: networkingv1.IngressSpec{
+			TLS: []networkingv1.IngressTLS{{
+				Hosts:      []string{c2HttpHost},
+				SecretName: fmt.Sprintf("c2-http-tls-%s", tenant.Status.TenantID),
+			}},
+			Rules: []networkingv1.IngressRule{{
+				Host: c2HttpHost,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Path:     "/",
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: "c2-http",
+									Port: networkingv1.ServiceBackendPort{
+										Number: 80,
+									},
+								},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
+
+	if err := r.Create(ctx, c2HttpIngress); err != nil && !errors.IsAlreadyExists(err) {
+		return err
+	}
+
+	// Payload Server Ingress
+	payloadHost := fmt.Sprintf("payloads.%s.%s", tenant.Status.TenantID, baseDomain)
+
+	payloadIngress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "payload-server-ingress",
+			Namespace: tenant.Status.Namespace,
+			Labels:    labels,
+			Annotations: map[string]string{
+				"kubernetes.io/ingress.class":                  "nginx",
+				"nginx.ingress.kubernetes.io/ssl-redirect":     "true",
+				"nginx.ingress.kubernetes.io/backend-protocol": "HTTP",
+				"nginx.ingress.kubernetes.io/proxy-body-size":  "100m",
+				"cert-manager.io/cluster-issuer":               "letsencrypt-prod",
+			},
+		},
+		Spec: networkingv1.IngressSpec{
+			TLS: []networkingv1.IngressTLS{{
+				Hosts:      []string{payloadHost},
+				SecretName: fmt.Sprintf("payload-tls-%s", tenant.Status.TenantID),
+			}},
+			Rules: []networkingv1.IngressRule{{
+				Host: payloadHost,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Path:     "/",
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: "payload-server",
+									Port: networkingv1.ServiceBackendPort{
+										Number: 80,
+									},
+								},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
+
+	if err := r.Create(ctx, payloadIngress); err != nil && !errors.IsAlreadyExists(err) {
+		return err
+	}
+
+	// Custom domain ingresses (enterprise only)
+	if tenant.Spec.Tier == mirqabv1.TierEnterprise && len(tenant.Spec.CustomDomains) > 0 {
+		for i, domain := range tenant.Spec.CustomDomains {
+			customIngress := &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("custom-domain-%d", i),
+					Namespace: tenant.Status.Namespace,
+					Labels:    labels,
+					Annotations: map[string]string{
+						"kubernetes.io/ingress.class":              "nginx",
+						"nginx.ingress.kubernetes.io/ssl-redirect": "true",
+						"cert-manager.io/cluster-issuer":           "letsencrypt-prod",
+					},
+				},
+				Spec: networkingv1.IngressSpec{
+					TLS: []networkingv1.IngressTLS{{
+						Hosts:      []string{domain},
+						SecretName: fmt.Sprintf("custom-domain-tls-%d", i),
+					}},
+					Rules: []networkingv1.IngressRule{{
+						Host: domain,
+						IngressRuleValue: networkingv1.IngressRuleValue{
+							HTTP: &networkingv1.HTTPIngressRuleValue{
+								Paths: []networkingv1.HTTPIngressPath{{
+									Path:     "/",
+									PathType: &pathType,
+									Backend: networkingv1.IngressBackend{
+										Service: &networkingv1.IngressServiceBackend{
+											Name: "c2-http",
+											Port: networkingv1.ServiceBackendPort{
+												Number: 80,
+											},
+										},
+									},
+								}},
+							},
+						},
+					}},
+				},
+			}
+
+			if err := r.Create(ctx, customIngress); err != nil && !errors.IsAlreadyExists(err) {
+				return err
+			}
+		}
+	}
+
+	r.setCondition(tenant, mirqabv1.ConditionCertificatesReady, metav1.ConditionTrue, "IngressCreated", "Ingress resources created")
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager
 func (r *TenantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -830,5 +1084,6 @@ func (r *TenantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Namespace{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&networkingv1.Ingress{}).
 		Complete(r)
 }
