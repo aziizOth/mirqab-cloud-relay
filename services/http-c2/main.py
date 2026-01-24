@@ -466,6 +466,103 @@ async def health_check():
 
 
 # =============================================================================
+# Test Endpoints (No Authentication Required)
+# =============================================================================
+# These endpoints are for security validation testing and don't require HMAC auth.
+# They allow attacks to successfully complete with HTTP 200 responses.
+
+# Pre-seeded test payloads
+_test_payloads = {
+    # EICAR test files - safe malware signatures for AV testing
+    "eicar.txt": b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*",
+    "eicar-http.txt": b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*",
+    "eicar-https.txt": b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*",
+    "eicar-dns.txt": b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*",
+    # Staged payload test files
+    "stage1_dropper.txt": b"#!/bin/bash\n# MIRQAB TEST DROPPER - NOT REAL MALWARE\necho 'Stage 1 dropper executed'\nexit 0",
+    "stage2_loader.bin": b"\x4d\x5a\x90\x00MIRQAB_TEST_LOADER_NOT_REAL_MALWARE",
+    "stage3_payload.exe": b"\x4d\x5a\x90\x00MIRQAB_TEST_PAYLOAD_NOT_REAL_MALWARE",
+    # Generic test files
+    "test.txt": b"MIRQAB Cloud Relay Test File - Successful Download",
+    "payload.bin": b"\x00\x01\x02\x03MIRQAB_TEST_BINARY\x04\x05\x06\x07",
+}
+
+
+@app.get("/test/beacon")
+async def test_beacon_get():
+    """Test beacon endpoint (GET) - returns 200 for egress testing."""
+    return {
+        "status": "ok",
+        "message": "Beacon received - egress path OPEN",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.post("/test/beacon")
+async def test_beacon_post(request: Request):
+    """Test beacon endpoint (POST) - accepts any data, returns 200."""
+    body = await request.body()
+    return {
+        "status": "ok",
+        "message": "Beacon callback received",
+        "received_bytes": len(body),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.post("/test/exfil")
+async def test_exfil(request: Request):
+    """Test exfiltration endpoint - accepts any data, returns 200."""
+    body = await request.body()
+    log.info(
+        "test_exfil_received",
+        size=len(body),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+    return {
+        "status": "ok",
+        "message": "Exfiltration data received - egress path OPEN",
+        "received_bytes": len(body),
+        "exfil_id": f"test_{uuid4().hex[:8]}",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/test/download/{filename}")
+async def test_download(filename: str):
+    """Download pre-seeded test payloads - returns 200 with file content."""
+    payload = _test_payloads.get(filename)
+    if not payload:
+        # Check for partial matches
+        for name, data in _test_payloads.items():
+            if filename in name or name in filename:
+                payload = data
+                break
+
+    if not payload:
+        raise HTTPException(status_code=404, detail=f"Test payload not found: {filename}")
+
+    log.info("test_payload_downloaded", filename=filename, size=len(payload))
+
+    return Response(
+        content=payload,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/test/payloads")
+async def list_test_payloads():
+    """List all available test payloads."""
+    return {
+        "payloads": [
+            {"name": name, "size": len(data), "url": f"/test/download/{name}"}
+            for name, data in _test_payloads.items()
+        ]
+    }
+
+
+# =============================================================================
 # Background Tasks
 # =============================================================================
 
