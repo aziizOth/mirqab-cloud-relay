@@ -1,28 +1,29 @@
 """
-Cloud Relay WAF Tester
-Tests Web Application Firewall effectiveness with OWASP payloads.
-Provides bypass testing and effectiveness scoring.
+Hybrid WAF Tester - Intelligent, Context-Aware WAF Testing Service.
+
+Features:
+- Dynamic target fingerprinting (OS, tech stack, WAF detection)
+- Context-aware payload selection
+- Harmless-but-real attack payloads
+- Pattern matching + LLM fallback analysis
 """
 
 import os
 import ssl
-import uuid
 import asyncio
 from datetime import datetime, timezone
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from contextlib import asynccontextmanager
-from enum import Enum
+from uuid import UUID
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from prometheus_client import make_asgi_app, Counter, Gauge, Histogram
-import redis.asyncio as redis
-import httpx
-import aiofiles
+from sqlalchemy.orm import Session
 
+# Configure logging
 structlog.configure(
     processors=[
         structlog.processors.TimeStamper(fmt="iso"),
@@ -35,414 +36,630 @@ structlog.configure(
 
 logger = structlog.get_logger(__name__)
 
-# Metrics
-TEST_COUNT = Counter('waf_tests_total', 'Total WAF tests', ['category', 'result'])
-BYPASS_COUNT = Counter('waf_bypasses_total', 'Total WAF bypasses detected', ['category'])
-ACTIVE_SCANS = Gauge('waf_active_scans', 'Active WAF scans')
-TEST_LATENCY = Histogram('waf_test_latency_seconds', 'Test execution latency')
+# Import components
+from .models import (
+    init_database, get_session_factory,
+    WafTestJob, WafTestResult, Payload,
+    PayloadCategory, JobStatus, TestStatus
+)
+from .discovery import Fingerprinter, Crawler, TargetContext
+from .payloads import PayloadDatabase, seed_payloads
+from .engine import PayloadSelector, RequestExecutor
+from .analyzer import ResponseAnalyzer
 
 
-class TestCategory(str, Enum):
-    SQLI = "sqli"
-    XSS = "xss"
-    RCE = "rce"
-    LFI = "lfi"
-    SSRF = "ssrf"
-    XXE = "xxe"
-    SSTI = "ssti"
-    IDOR = "idor"
-    CSRF = "csrf"
+# ============================================
+# Pydantic Schemas
+# ============================================
+
+class TargetConfig(BaseModel):
+    """Target configuration."""
+    type: str = Field(..., description="Target type: 'url' or 'agent'")
+    url: Optional[str] = Field(None, description="Target URL for URL mode")
+    agent_id: Optional[str] = Field(None, description="Agent ID for agent mode")
+    agent_context: Optional[Dict[str, Any]] = Field(None, description="Pre-collected agent context")
+    paths: Optional[List[str]] = Field(None, description="Specific paths to test")
 
 
-class TestResult(str, Enum):
-    BLOCKED = "blocked"
-    BYPASSED = "bypassed"
-    ERROR = "error"
-    TIMEOUT = "timeout"
+class TestOptions(BaseModel):
+    """Test options."""
+    categories: Optional[List[str]] = Field(None, description="Attack categories (empty=all)")
+    max_payloads_per_endpoint: int = Field(50, description="Max payloads per endpoint")
+    rate_limit_rps: int = Field(10, description="Requests per second")
+    include_bypass_variants: bool = Field(True, description="Include WAF bypass variants")
+    discovery_depth: int = Field(3, description="Crawl depth for URL mode")
+    use_llm_analysis: bool = Field(True, description="Enable LLM fallback for ambiguous cases")
+    custom_headers: Optional[Dict[str, str]] = Field(None, description="Custom HTTP headers")
 
 
-class WafTest(BaseModel):
-    """Single WAF test case."""
-    test_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    category: TestCategory
+class StartTestRequest(BaseModel):
+    """Request to start a WAF test."""
+    attack_id: Optional[str] = Field(None, description="Attack ID from OffenSight")
+    target: TargetConfig
+    options: Optional[TestOptions] = None
+
+
+class TestSummary(BaseModel):
+    """Test summary."""
+    total_tests: int
+    blocked: int
+    vulnerable: int
+    not_vulnerable: int
+    errors: int
+    effectiveness_pct: float
+
+
+class TestResponse(BaseModel):
+    """WAF test response."""
+    job_id: str
+    status: str
+    progress: int = 0
+    target_info: Optional[Dict[str, Any]] = None
+    summary: Optional[TestSummary] = None
+    findings: Optional[List[Dict[str, Any]]] = None
+
+
+class QuickTestRequest(BaseModel):
+    """Quick single payload test."""
+    target_url: str
     payload: str
-    description: Optional[str] = None
-    encoding: Optional[str] = None  # url, base64, unicode, etc.
+    param_name: str = "q"
+    category: str = "xss"
 
 
-class ScanConfig(BaseModel):
-    """WAF scan configuration."""
-    scan_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    target_url: str
-    categories: List[TestCategory] = [c for c in TestCategory]
-    rate_limit: int = 10  # requests per second
-    timeout: int = 10
-    custom_headers: Dict[str, str] = {}
-    follow_redirects: bool = False
+# ============================================
+# Application State
+# ============================================
+
+class AppState:
+    """Application state."""
+    session_factory: Any = None
+    fingerprinter: Fingerprinter = None
+    crawler: Crawler = None
+    analyzer: ResponseAnalyzer = None
+    jobs: Dict[str, WafTestJob] = {}
 
 
-class ScanResult(BaseModel):
-    """WAF scan results."""
-    scan_id: str
-    target_url: str
-    started_at: datetime
-    completed_at: Optional[datetime] = None
-    status: str = "running"
-    total_tests: int = 0
-    blocked: int = 0
-    bypassed: int = 0
-    errors: int = 0
-    timeouts: int = 0
-    effectiveness_score: float = 0.0
-    results: List[Dict] = []
+app_state = AppState()
 
 
-# Payload storage
-PAYLOAD_DIR = "/app/payloads"
-payloads: Dict[TestCategory, List[str]] = {}
-scans: Dict[str, ScanResult] = {}
+def get_db() -> Session:
+    """Get database session."""
+    session = app_state.session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
-async def load_payloads():
-    """Load test payloads from files."""
-    for category in TestCategory:
-        payload_file = f"{PAYLOAD_DIR}/{category.value}.txt"
-        if os.path.exists(payload_file):
-            async with aiofiles.open(payload_file, 'r') as f:
-                content = await f.read()
-                payloads[category] = [
-                    line.strip() for line in content.split('\n')
-                    if line.strip() and not line.startswith('#')
-                ]
-        else:
-            payloads[category] = get_default_payloads(category)
-
-    logger.info(
-        "payloads_loaded",
-        categories={c.value: len(p) for c, p in payloads.items()}
-    )
-
-
-def get_default_payloads(category: TestCategory) -> List[str]:
-    """Get default payloads for a category."""
-    defaults = {
-        TestCategory.SQLI: [
-            "' OR '1'='1",
-            "' OR '1'='1'--",
-            "1' ORDER BY 1--+",
-            "1' UNION SELECT NULL--+",
-            "admin'--",
-        ],
-        TestCategory.XSS: [
-            "<script>alert('XSS')</script>",
-            "<img src=x onerror=alert('XSS')>",
-            "<svg onload=alert('XSS')>",
-            "javascript:alert('XSS')",
-        ],
-        TestCategory.RCE: [
-            "; ls -la",
-            "| cat /etc/passwd",
-            "`whoami`",
-            "$(id)",
-        ],
-        TestCategory.LFI: [
-            "../../../etc/passwd",
-            "....//....//....//etc/passwd",
-            "/etc/passwd%00",
-        ],
-        TestCategory.SSRF: [
-            "http://localhost/admin",
-            "http://127.0.0.1/admin",
-            "http://169.254.169.254/latest/meta-data/",
-        ],
-        TestCategory.XXE: [
-            '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>',
-        ],
-        TestCategory.SSTI: [
-            "{{7*7}}",
-            "${7*7}",
-            "<%= 7*7 %>",
-        ],
-        TestCategory.IDOR: [
-            "../user/1",
-            "user_id=1",
-        ],
-        TestCategory.CSRF: [
-            # CSRF payloads are more about missing tokens
-        ],
-    }
-    return defaults.get(category, [])
-
+# ============================================
+# Lifespan
+# ============================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan."""
     logger.info("waf_tester_starting")
 
-    redis_host = os.getenv("REDIS_HOST", "localhost")
-    redis_port = int(os.getenv("REDIS_PORT", "6379"))
-    app.state.redis = await redis.from_url(
-        f"redis://{redis_host}:{redis_port}",
-        encoding="utf-8",
-        decode_responses=True
-    )
+    # Initialize database
+    init_database()
+    app_state.session_factory = get_session_factory()
 
-    # Load payloads
-    await load_payloads()
+    # Seed payloads
+    session = app_state.session_factory()
+    try:
+        count = seed_payloads(session)
+        logger.info("payloads_seeded", count=count)
+    finally:
+        session.close()
+
+    # Initialize components
+    app_state.fingerprinter = Fingerprinter()
+    app_state.crawler = Crawler()
+    app_state.analyzer = ResponseAnalyzer(
+        use_llm=os.getenv("ENABLE_LLM_ANALYSIS", "true").lower() == "true",
+        llm_api_key=os.getenv("OPENAI_API_KEY"),
+    )
 
     yield
 
-    await app.state.redis.close()
     logger.info("waf_tester_stopped")
 
 
+# ============================================
+# FastAPI App
+# ============================================
+
 app = FastAPI(
-    title="Cloud Relay WAF Tester",
-    description="WAF effectiveness testing service",
-    version="1.0.0",
+    title="Hybrid WAF Tester",
+    description="Intelligent, context-aware WAF testing service",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
 
+# ============================================
+# Test Orchestration
+# ============================================
+
+async def run_waf_test(job_id: str, request: StartTestRequest, db: Session):
+    """Run a complete WAF test job."""
+    job = db.query(WafTestJob).filter(WafTestJob.id == job_id).first()
+    if not job:
+        logger.error("job_not_found", job_id=job_id)
+        return
+
+    try:
+        job.status = JobStatus.DISCOVERING
+        job.started_at = datetime.now(timezone.utc)
+        db.commit()
+
+        target = request.target
+        options = request.options or TestOptions()
+
+        # ============================================
+        # Phase 1: Discovery
+        # ============================================
+        logger.info("discovery_started", job_id=str(job_id), target_type=target.type)
+
+        if target.type == "agent" and target.agent_context:
+            # Agent-assisted mode - use provided context
+            context = app_state.fingerprinter.analyze_agent_context(target.agent_context)
+        else:
+            # URL mode - fingerprint and crawl
+            executor = RequestExecutor(rate_limit=options.rate_limit_rps)
+            baseline = await executor.execute_baseline(target.url, options.custom_headers)
+
+            # Fingerprint
+            context = app_state.fingerprinter.analyze_response(
+                url=target.url,
+                status_code=baseline.get("status_code", 200),
+                headers=baseline.get("response_headers", {}),
+                body=baseline.get("response_body", ""),
+            )
+
+            # Crawl for endpoints
+            if options.discovery_depth > 0:
+                endpoints, params = await app_state.crawler.crawl(
+                    target.url,
+                    custom_headers=options.custom_headers,
+                )
+                context.endpoints = [e.to_dict() for e in endpoints]
+                context.parameters = [p.to_dict() for p in params]
+
+        # Update job with discovery results
+        job.discovered_os = context.os
+        job.discovered_tech = context.tech
+        job.discovered_server = context.server
+        job.discovered_framework = context.framework
+        job.discovered_db = context.db
+        job.discovered_waf = context.waf
+        job.discovered_endpoints = context.endpoints
+        job.discovered_parameters = context.parameters
+        db.commit()
+
+        logger.info(
+            "discovery_complete",
+            job_id=str(job_id),
+            os=context.os,
+            tech=context.tech,
+            waf=context.waf,
+            endpoints=len(context.endpoints),
+        )
+
+        # ============================================
+        # Phase 2: Payload Selection
+        # ============================================
+        job.status = JobStatus.RUNNING
+        db.commit()
+
+        payload_db = PayloadDatabase(db)
+        selector = PayloadSelector(payload_db)
+
+        # Determine categories to test
+        categories = None
+        if options.categories:
+            categories = [PayloadCategory(c) for c in options.categories if c in PayloadCategory.__members__.values()]
+
+        # Select payloads for all categories
+        all_selections = selector.select_all_categories(
+            context=context,
+            categories=categories,
+            max_per_category=options.max_payloads_per_endpoint,
+            include_bypass=options.include_bypass_variants,
+        )
+
+        total_payloads = sum(len(sels) for sels in all_selections.values())
+        logger.info(
+            "payloads_selected",
+            job_id=str(job_id),
+            total=total_payloads,
+            categories=list(all_selections.keys()),
+        )
+
+        # ============================================
+        # Phase 3: Execution
+        # ============================================
+        executor = RequestExecutor(
+            rate_limit=options.rate_limit_rps,
+            timeout=10,
+        )
+
+        all_results = []
+        payload_map = {}
+        completed = 0
+        total = sum(
+            len(sel.injection_points) * len(selections)
+            for selections in all_selections.values()
+            for sel in selections
+        )
+
+        for category, selections in all_selections.items():
+            for selection in selections:
+                payload_map[selection.payload.id] = selection.payload
+
+            # Execute
+            results = await executor.execute_selections(
+                base_url=target.url,
+                selections=selections,
+                custom_headers=options.custom_headers,
+                progress_callback=lambda c, t: None,  # Could update job.progress here
+            )
+
+            all_results.extend(results)
+            completed += len(results)
+
+            # Update progress
+            job.progress = int((completed / total) * 100) if total > 0 else 0
+            db.commit()
+
+        # ============================================
+        # Phase 4: Analysis
+        # ============================================
+        baseline = await executor.execute_baseline(target.url, options.custom_headers)
+
+        analyzed_results = await app_state.analyzer.analyze_batch(
+            results=all_results,
+            payloads=payload_map,
+            baseline=baseline,
+        )
+
+        # ============================================
+        # Phase 5: Store Results
+        # ============================================
+        blocked = 0
+        vulnerable = 0
+        not_vulnerable = 0
+        errors = 0
+
+        for result in analyzed_results:
+            test_result = WafTestResult(
+                job_id=job.id,
+                endpoint=result.endpoint,
+                parameter=result.parameter,
+                param_location=result.param_location,
+                attack_category=payload_map.get(result.payload_id, Payload()).category if result.payload_id in payload_map else PayloadCategory.XSS,
+                payload_id=result.payload_id,
+                payload=result.payload,
+                status=result.test_status,
+                confidence=result.confidence,
+                analysis_method=result.analysis_method,
+                evidence=result.evidence,
+                response_status=result.status_code,
+                response_time_ms=result.response_time_ms,
+                response_length=result.response_length,
+                waf_signature=result.waf_signature,
+            )
+            db.add(test_result)
+
+            if result.test_status == TestStatus.BLOCKED:
+                blocked += 1
+            elif result.test_status == TestStatus.VULNERABLE:
+                vulnerable += 1
+            elif result.test_status == TestStatus.NOT_VULNERABLE:
+                not_vulnerable += 1
+            else:
+                errors += 1
+
+        # Update job summary
+        job.total_tests = len(analyzed_results)
+        job.blocked_count = blocked
+        job.vulnerable_count = vulnerable
+        job.not_vulnerable_count = not_vulnerable
+        job.error_count = errors
+        job.status = JobStatus.COMPLETED
+        job.completed_at = datetime.now(timezone.utc)
+        job.progress = 100
+        db.commit()
+
+        logger.info(
+            "test_completed",
+            job_id=str(job_id),
+            total=len(analyzed_results),
+            blocked=blocked,
+            vulnerable=vulnerable,
+            effectiveness_pct=round((blocked / len(analyzed_results) * 100), 1) if analyzed_results else 0,
+        )
+
+    except Exception as e:
+        logger.exception("test_failed", job_id=str(job_id), error=str(e))
+        job.status = JobStatus.FAILED
+        job.error_message = str(e)
+        db.commit()
+
+
+# ============================================
+# API Endpoints
+# ============================================
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "waf-tester"}
+    """Health check."""
+    return {"status": "healthy", "service": "waf-tester", "version": "2.0.0"}
 
 
-@app.get("/ready")
-async def ready():
-    try:
-        await app.state.redis.ping()
-        return {"status": "ready"}
-    except Exception:
-        return JSONResponse(status_code=503, content={"status": "not ready"})
-
-
-async def test_payload(
-    client: httpx.AsyncClient,
-    url: str,
-    payload: str,
-    category: TestCategory,
-    headers: Dict[str, str],
-    timeout: int,
-) -> Dict:
-    """Test a single payload against the target."""
-    result = {
-        "payload": payload,
-        "category": category.value,
-        "result": TestResult.ERROR.value,
-        "status_code": None,
-        "response_length": None,
-        "latency_ms": None,
-    }
-
-    start_time = datetime.now(timezone.utc)
-
-    try:
-        # Test in different injection points
-        test_url = f"{url}?q={payload}"
-
-        with TEST_LATENCY.time():
-            response = await client.get(
-                test_url,
-                headers=headers,
-                timeout=timeout,
-            )
-
-        latency = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
-        result["latency_ms"] = latency
-        result["status_code"] = response.status_code
-        result["response_length"] = len(response.content)
-
-        # Determine if blocked or bypassed
-        if response.status_code in (403, 406, 429, 503):
-            result["result"] = TestResult.BLOCKED.value
-            TEST_COUNT.labels(category=category.value, result="blocked").inc()
-        elif response.status_code == 200:
-            # Check response content for WAF block messages
-            content = response.text.lower()
-            block_indicators = [
-                "blocked", "forbidden", "security", "firewall",
-                "access denied", "not allowed", "detected"
-            ]
-            if any(indicator in content for indicator in block_indicators):
-                result["result"] = TestResult.BLOCKED.value
-                TEST_COUNT.labels(category=category.value, result="blocked").inc()
-            else:
-                result["result"] = TestResult.BYPASSED.value
-                TEST_COUNT.labels(category=category.value, result="bypassed").inc()
-                BYPASS_COUNT.labels(category=category.value).inc()
-        else:
-            result["result"] = TestResult.BYPASSED.value
-            TEST_COUNT.labels(category=category.value, result="bypassed").inc()
-
-    except httpx.TimeoutException:
-        result["result"] = TestResult.TIMEOUT.value
-        TEST_COUNT.labels(category=category.value, result="timeout").inc()
-    except Exception as e:
-        result["error"] = str(e)
-        TEST_COUNT.labels(category=category.value, result="error").inc()
-
-    return result
-
-
-async def run_scan(scan_config: ScanConfig):
-    """Run a WAF scan."""
-    scan = ScanResult(
-        scan_id=scan_config.scan_id,
-        target_url=scan_config.target_url,
-        started_at=datetime.now(timezone.utc),
-    )
-    scans[scan.scan_id] = scan
-    ACTIVE_SCANS.set(len([s for s in scans.values() if s.status == "running"]))
-
-    logger.info(
-        "scan_started",
-        scan_id=scan.scan_id,
-        target=scan_config.target_url,
-        categories=[c.value for c in scan_config.categories],
-    )
-
-    async with httpx.AsyncClient(verify=False, follow_redirects=scan_config.follow_redirects) as client:
-        for category in scan_config.categories:
-            category_payloads = payloads.get(category, [])
-
-            for payload in category_payloads:
-                scan.total_tests += 1
-
-                result = await test_payload(
-                    client=client,
-                    url=scan_config.target_url,
-                    payload=payload,
-                    category=category,
-                    headers=scan_config.custom_headers,
-                    timeout=scan_config.timeout,
-                )
-                scan.results.append(result)
-
-                # Update counts
-                if result["result"] == TestResult.BLOCKED.value:
-                    scan.blocked += 1
-                elif result["result"] == TestResult.BYPASSED.value:
-                    scan.bypassed += 1
-                elif result["result"] == TestResult.TIMEOUT.value:
-                    scan.timeouts += 1
-                else:
-                    scan.errors += 1
-
-                # Rate limiting
-                await asyncio.sleep(1 / scan_config.rate_limit)
-
-    # Calculate effectiveness
-    if scan.total_tests > 0:
-        scan.effectiveness_score = (scan.blocked / scan.total_tests) * 100
-
-    scan.completed_at = datetime.now(timezone.utc)
-    scan.status = "completed"
-    ACTIVE_SCANS.set(len([s for s in scans.values() if s.status == "running"]))
-
-    logger.info(
-        "scan_completed",
-        scan_id=scan.scan_id,
-        total_tests=scan.total_tests,
-        blocked=scan.blocked,
-        bypassed=scan.bypassed,
-        effectiveness=f"{scan.effectiveness_score:.1f}%",
-    )
-
-
-# API Endpoints
-@app.post("/api/scan")
-async def start_scan(config: ScanConfig, background_tasks: BackgroundTasks):
-    """Start a WAF scan."""
-    background_tasks.add_task(run_scan, config)
-
-    return {
-        "scan_id": config.scan_id,
-        "status": "started",
-        "target": config.target_url,
-        "categories": [c.value for c in config.categories],
-    }
-
-
-@app.get("/api/scan/{scan_id}")
-async def get_scan(scan_id: str):
-    """Get scan results."""
-    if scan_id not in scans:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    return scans[scan_id]
-
-
-@app.get("/api/scans")
-async def list_scans():
-    """List all scans."""
-    return {"scans": list(scans.values())}
-
-
-@app.get("/api/payloads")
-async def get_payloads(category: Optional[TestCategory] = None):
-    """Get available test payloads."""
-    if category:
-        return {category.value: payloads.get(category, [])}
-    return {c.value: p for c, p in payloads.items()}
-
-
-@app.post("/api/test/single")
-async def test_single(
-    target_url: str,
-    payload: str,
-    category: TestCategory = TestCategory.XSS,
+@app.post("/waf/test", response_model=TestResponse)
+async def start_test(
+    request: StartTestRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
 ):
-    """Test a single payload."""
-    async with httpx.AsyncClient(verify=False) as client:
-        result = await test_payload(
-            client=client,
-            url=target_url,
-            payload=payload,
-            category=category,
-            headers={},
-            timeout=10,
+    """Start a new WAF test."""
+    # Validate target
+    if request.target.type == "url" and not request.target.url:
+        raise HTTPException(400, "URL required for URL mode")
+
+    # Create job
+    options = request.options or TestOptions()
+    job = WafTestJob(
+        attack_id=request.attack_id,
+        target_type=request.target.type,
+        target_url=request.target.url or "",
+        target_agent_id=request.target.agent_id,
+        attack_categories=[c for c in (options.categories or [])],
+        max_payloads_per_endpoint=options.max_payloads_per_endpoint,
+        rate_limit_rps=options.rate_limit_rps,
+        include_bypass_variants=options.include_bypass_variants,
+        discovery_depth=options.discovery_depth,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    # Start background task
+    background_tasks.add_task(run_waf_test, str(job.id), request, db)
+
+    return TestResponse(
+        job_id=str(job.id),
+        status=job.status.value,
+        progress=0,
+    )
+
+
+@app.get("/waf/test/{job_id}", response_model=TestResponse)
+async def get_test(job_id: str, db: Session = Depends(get_db)):
+    """Get test status and results."""
+    try:
+        uuid_id = UUID(job_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid job ID")
+
+    job = db.query(WafTestJob).filter(WafTestJob.id == uuid_id).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    # Build response
+    response = TestResponse(
+        job_id=str(job.id),
+        status=job.status.value,
+        progress=job.progress,
+    )
+
+    # Add target info if discovered
+    if job.discovered_tech or job.discovered_os:
+        response.target_info = {
+            "os": job.discovered_os,
+            "tech": job.discovered_tech,
+            "server": job.discovered_server,
+            "framework": job.discovered_framework,
+            "db": job.discovered_db,
+            "waf": job.discovered_waf,
+            "endpoints_discovered": len(job.discovered_endpoints or []),
+        }
+
+    # Add summary if completed
+    if job.status == JobStatus.COMPLETED:
+        total = job.total_tests or 1
+        response.summary = TestSummary(
+            total_tests=job.total_tests,
+            blocked=job.blocked_count,
+            vulnerable=job.vulnerable_count,
+            not_vulnerable=job.not_vulnerable_count,
+            errors=job.error_count,
+            effectiveness_pct=round((job.blocked_count / total * 100), 1),
         )
-    return result
+
+        # Add top findings (vulnerabilities)
+        results = db.query(WafTestResult).filter(
+            WafTestResult.job_id == job.id,
+            WafTestResult.status == TestStatus.VULNERABLE,
+        ).limit(20).all()
+
+        response.findings = [
+            {
+                "endpoint": r.endpoint,
+                "parameter": r.parameter,
+                "category": r.attack_category.value,
+                "payload": r.payload[:100],
+                "confidence": r.confidence,
+                "evidence": r.evidence,
+                "waf_bypassed": r.waf_signature is None,
+            }
+            for r in results
+        ]
+
+    return response
 
 
-# Quick test endpoint for common attacks
-@app.get("/api/quicktest")
-async def quick_test(target_url: str):
-    """Quick test with common payloads."""
-    quick_payloads = [
-        (TestCategory.SQLI, "' OR '1'='1"),
-        (TestCategory.XSS, "<script>alert(1)</script>"),
-        (TestCategory.RCE, "; cat /etc/passwd"),
-        (TestCategory.LFI, "../../../etc/passwd"),
-    ]
+@app.get("/waf/test/{job_id}/results")
+async def get_test_results(
+    job_id: str,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    """Get detailed test results."""
+    try:
+        uuid_id = UUID(job_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid job ID")
 
-    results = []
-    async with httpx.AsyncClient(verify=False) as client:
-        for category, payload in quick_payloads:
-            result = await test_payload(
-                client=client,
-                url=target_url,
-                payload=payload,
-                category=category,
-                headers={},
-                timeout=10,
-            )
-            results.append(result)
+    query = db.query(WafTestResult).filter(WafTestResult.job_id == uuid_id)
 
-    blocked = sum(1 for r in results if r["result"] == "blocked")
+    if status:
+        query = query.filter(WafTestResult.status == TestStatus(status))
+
+    if category:
+        query = query.filter(WafTestResult.attack_category == PayloadCategory(category))
+
+    total = query.count()
+    results = query.offset(offset).limit(limit).all()
+
     return {
-        "target": target_url,
-        "tests": len(results),
-        "blocked": blocked,
-        "bypassed": len(results) - blocked,
-        "effectiveness": f"{(blocked / len(results) * 100):.0f}%",
-        "results": results,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "results": [r.to_dict() if hasattr(r, 'to_dict') else {
+            "id": str(r.id),
+            "endpoint": r.endpoint,
+            "parameter": r.parameter,
+            "category": r.attack_category.value,
+            "payload": r.payload,
+            "status": r.status.value,
+            "confidence": r.confidence,
+            "evidence": r.evidence,
+            "response_status": r.response_status,
+            "response_time_ms": r.response_time_ms,
+            "waf_signature": r.waf_signature,
+        } for r in results],
     }
 
+
+@app.post("/waf/discover")
+async def discover_target(
+    target: TargetConfig,
+    custom_headers: Optional[Dict[str, str]] = None,
+):
+    """Run discovery only (no attacks)."""
+    if target.type != "url" or not target.url:
+        raise HTTPException(400, "URL required for discovery")
+
+    executor = RequestExecutor()
+    baseline = await executor.execute_baseline(target.url, custom_headers)
+
+    if baseline.get("error"):
+        raise HTTPException(502, f"Failed to reach target: {baseline['error']}")
+
+    context = app_state.fingerprinter.analyze_response(
+        url=target.url,
+        status_code=baseline.get("status_code", 200),
+        headers=baseline.get("response_headers", {}),
+        body=baseline.get("response_body", ""),
+    )
+
+    # Quick endpoint discovery
+    endpoints, params = await app_state.crawler.quick_discover(target.url, custom_headers)
+
+    return {
+        "url": target.url,
+        "os": context.os,
+        "tech": context.tech,
+        "server": context.server,
+        "framework": context.framework,
+        "db": context.db,
+        "waf": context.waf,
+        "confidence_scores": context.confidence_scores,
+        "endpoints": [e.to_dict() for e in endpoints],
+        "parameters": [p.to_dict() for p in params],
+    }
+
+
+@app.post("/waf/quicktest")
+async def quick_test(request: QuickTestRequest):
+    """Quick test with a single payload."""
+    executor = RequestExecutor()
+    result = await executor.quick_test(
+        url=request.target_url,
+        payload=request.payload,
+        param_name=request.param_name,
+    )
+
+    # Quick analysis
+    is_blocked, waf_name = app_state.fingerprinter.detect_waf_block(
+        status_code=result.status_code or 0,
+        headers=result.response_headers,
+        body=result.response_body,
+    ) if result.status_code else (False, None)
+
+    return {
+        "payload": request.payload,
+        "target": request.target_url,
+        "status_code": result.status_code,
+        "response_time_ms": result.response_time_ms,
+        "blocked": is_blocked,
+        "waf_detected": waf_name,
+        "response_preview": result.response_body[:500] if result.response_body else None,
+    }
+
+
+@app.get("/waf/payloads")
+async def list_payloads(
+    category: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """List available payloads."""
+    payload_db = PayloadDatabase(db)
+
+    if category:
+        try:
+            cat = PayloadCategory(category)
+            payloads = payload_db.get_all_by_category(cat)
+            return {
+                "category": category,
+                "count": len(payloads),
+                "payloads": [
+                    {
+                        "id": p.id,
+                        "payload": p.payload,
+                        "description": p.description,
+                        "target_os": p.target_os.value,
+                        "target_tech": p.target_tech,
+                    }
+                    for p in payloads
+                ],
+            }
+        except ValueError:
+            raise HTTPException(400, f"Invalid category: {category}")
+
+    return payload_db.get_stats()
+
+
+@app.get("/waf/categories")
+async def list_categories():
+    """List attack categories with recommendations."""
+    return {
+        "categories": [
+            {"id": c.value, "name": c.name}
+            for c in PayloadCategory
+        ]
+    }
+
+
+# ============================================
+# Main
+# ============================================
 
 if __name__ == "__main__":
     ssl_context = None

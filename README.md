@@ -1,117 +1,158 @@
 # Mirqab Cloud Relay
 
-**Phase 2B: Cloud-Agnostic C2 Infrastructure**
+**Self-Contained External Attack Infrastructure**
 
-Multi-tenant infrastructure for Command & Control (C2) channels during security validation exercises.
-Handles **REAL** attack traffic from OffenSight agents - not simulations.
+Cloud Relay is the **external attack platform** for Mirqab Security Validation. It handles ALL attack capabilities for MITRE ATT&CK techniques that require external infrastructure.
+
+## Important: Architecture Clarification
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           MIRQAB COMPANY (SaaS)                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                    COMMAND CENTER (mirqab-command-center)                │   │
+│  │                    Management Portal Only - NOT involved in attacks      │   │
+│  │    - License management          - Subscription tiers                    │   │
+│  │    - Push Sigma rules/CVEs       - Attack definition updates             │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                        │ Push feeds, licenses
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           CUSTOMER ENVIRONMENT                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │              MASTER SERVER (OffenSight + Security Sentinel)              │   │
+│  │              Frontend + Backend - Orchestrates ALL attacks               │   │
+│  └──────────────────────────────────┬──────────────────────────────────────┘   │
+│                 │                    │                    │                     │
+│           ┌─────┴─────┐        ┌─────┴─────┐        ┌─────┴─────┐              │
+│           │  Agents   │        │  Crucible │        │  Network  │              │
+│           │ (targets) │        │   (VMs)   │        │  Actors   │              │
+│           └─────┬─────┘        └───────────┘        └───────────┘              │
+│                 │ OUTBOUND_EXTERNAL (Agent → Cloud Relay)                      │
+└─────────────────┼──────────────────────────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    CLOUD RELAY (External - VM/Cloud/On-Prem)                     │
+│                    SELF-CONTAINED Attack Infrastructure                          │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │  OUTBOUND Attack Reception          │  INBOUND Attack Execution         │   │
+│  │  (Receives callbacks from agents)   │  (Attacks targets from outside)   │   │
+│  │  ┌─────────────┐  ┌─────────────┐   │  ┌─────────────┐  ┌─────────────┐ │   │
+│  │  │  HTTP C2    │  │  DNS C2     │   │  │ WAF Tester  │  │ Web Scanner │ │   │
+│  │  │  /beacon    │  │  dns.relay  │   │  │ SQLi, XSS   │  │ Vuln Scan   │ │   │
+│  │  │  /exfil     │  │             │   │  │ RCE, LFI    │  │             │ │   │
+│  │  │  /stage     │  │             │   │  │ SSRF, XXE   │  │             │ │   │
+│  │  └─────────────┘  └─────────────┘   │  └─────────────┘  └─────────────┘ │   │
+│  │  ┌─────────────┐  ┌─────────────┐   │  ┌─────────────┐                   │   │
+│  │  │ SMTP Phish  │  │ File Exfil  │   │  │ Port Scan   │                   │   │
+│  │  │ /phishing   │  │ Upload recv │   │  │ Service Enum│                   │   │
+│  │  └─────────────┘  └─────────────┘   │  └─────────────┘                   │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                  │
+│  Key: Cloud Relay is SELF-CONTAINED - handles attacks INDEPENDENTLY             │
+│       Master Server queries Cloud Relay API for execution results               │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Execution Models
+
+| Model | Direction | Description |
+|-------|-----------|-------------|
+| **OUTBOUND_EXTERNAL** | Agent → Cloud Relay | C2 callbacks, data exfiltration |
+| **INBOUND_EXTERNAL** | Cloud Relay → Target | WAF testing, web attacks, port scanning |
 
 ## Cloud Agnostic Design
 
-This relay is designed to run on **any Kubernetes cluster** or serverless platform:
+Deploy on **any Kubernetes cluster** or serverless platform:
 
 | Provider | Recommended Service | Region |
 |----------|---------------------|--------|
 | **GCP** | GKE / Cloud Run | me-central2 (Saudi Arabia) |
 | **AWS** | EKS / Fargate | me-south-1 (Bahrain) |
 | **Azure** | AKS / Container Apps | UAE North |
-| **On-Prem** | K3s / K8s | Air-gapped environments |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      Any Kubernetes Cluster                             │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │                    Tenant Namespace Isolation                      │  │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐   │  │
-│  │  │  HTTP C2    │  │  DNS C2     │  │  File Exfil Service     │   │  │
-│  │  │  Service    │  │  Service    │  │  (S3/GCS/Azure/MinIO)   │   │  │
-│  │  └──────┬──────┘  └──────┬──────┘  └───────────┬─────────────┘   │  │
-│  │         │                │                      │                  │  │
-│  │         └────────────────┼──────────────────────┘                  │  │
-│  │                          │                                          │  │
-│  │                    ┌─────┴─────┐                                    │  │
-│  │                    │  Ingress  │                                    │  │
-│  │                    │  Gateway  │                                    │  │
-│  │                    └─────┬─────┘                                    │  │
-│  └──────────────────────────┼───────────────────────────────────────┘  │
-│                             │                                           │
-│                    Network Policies                                     │
-│                    + Rate Limiting                                      │
-└─────────────────────────────┼───────────────────────────────────────────┘
-                              │
-                    ┌─────────┴─────────┐
-                    │  Customer Agents  │
-                    │  (OffenSight)     │
-                    └───────────────────┘
-```
+| **On-Prem** | K3s / Docker | Air-gapped environments |
 
 ## Key Features
 
-- **Real C2 Traffic**: Receives actual attack callbacks from agents
+- **Self-Contained**: All attack capabilities built-in, no external dependencies
+- **Real Traffic**: Handles actual C2 callbacks and attack execution - not simulations
 - **Cloud Agnostic**: Deploy on GCP, AWS, Azure, or on-prem
 - **Multi-Tenant**: Isolated namespaces per customer
-- **Scales to Zero**: No cost when not in use
-- **mTLS**: Mutual TLS authentication with Command Center
+- **Scales to Zero**: Serverless options for cost optimization
+- **Full Audit Trail**: All activity logged for evidence collection
+
+## Services & MITRE ATT&CK Coverage
+
+### OUTBOUND Services (Receive callbacks from agents)
+
+| Service | Endpoints | MITRE Techniques |
+|---------|-----------|------------------|
+| **HTTP C2** | `/beacon`, `/exfil`, `/stage`, `/download` | T1071.001 (Web Protocols), T1041 (Exfiltration Over C2) |
+| **DNS C2** | DNS queries to relay domain | T1071.004 (DNS), T1568.002 (Domain Generation) |
+| **SMTP Phishing** | `/phishing`, `/track`, `/landing` | T1566.002 (Spearphishing Link), T1598 (Phishing for Info) |
+| **File Exfil** | Upload endpoint | T1048 (Exfiltration Over Alternative Protocol) |
+
+### INBOUND Services (Attack targets from Cloud Relay)
+
+| Service | Attack Types | MITRE Techniques |
+|---------|--------------|------------------|
+| **WAF Tester** | SQLi, XSS, RCE, LFI, RFI, SSRF, XXE, SSTI | T1190 (Exploit Public-Facing App) |
+| **Web Scanner** | Vulnerability scanning | T1595 (Active Scanning) |
+| **Port Scanner** | Service enumeration | T1046 (Network Service Scanning) |
 
 ## Directory Structure
 
 ```
 mirqab-cloud-relay/
 ├── README.md
+├── docker-compose.yml           # Local/VM deployment
 ├── kubernetes/
 │   ├── base/                    # Cloud-agnostic base configs
-│   │   ├── namespace.yaml
-│   │   ├── network-policy.yaml
-│   │   ├── deployments/
-│   │   └── services/
 │   └── overlays/
 │       ├── gcp/                 # GCP-specific
 │       ├── aws/                 # AWS-specific
-│       ├── azure/               # Azure-specific
 │       └── local/               # Local K3s/Kind
 ├── services/
-│   ├── http-c2/                 # HTTP C2 service
-│   ├── dns-c2/                  # DNS C2 service
-│   └── file-exfil/              # File exfiltration service
+│   ├── http-c2/                 # HTTP C2 service (beacon, exfil, staging)
+│   ├── smtp-phishing/           # SMTP phishing service
+│   ├── waf-tester/              # WAF testing service (INBOUND attacks)
+│   ├── dns-c2/                  # DNS C2 service (TODO)
+│   └── file-exfil/              # File exfiltration service (TODO)
 ├── terraform/
 │   ├── gcp/                     # GCP infrastructure
-│   ├── aws/                     # AWS infrastructure (TODO)
-│   └── azure/                   # Azure infrastructure (TODO)
-├── helm/                        # Helm chart
+│   └── aws/                     # AWS infrastructure (TODO)
+├── helm/                        # Helm chart (TODO)
 └── docs/
 ```
 
-## Sprint Plan
+## Implementation Status
 
-### Sprint 23: Infrastructure Foundation
-- [x] Project structure
-- [x] Cloud-agnostic Kubernetes base
-- [x] Terraform GCP setup
-- [ ] Terraform AWS/Azure (when needed)
-- [ ] Network policies
+### OUTBOUND Services (Receive C2 callbacks)
+- [x] **HTTP C2 Service** - Beacon callbacks, payload staging, exfiltration
+- [x] **SMTP Phishing Service** - Campaign tracking, landing pages
+- [ ] **DNS C2 Service** - DNS tunneling (TODO)
+- [ ] **File Exfiltration Service** - Cloud storage abstraction (TODO)
 
-### Sprint 24: HTTP C2 Service
-- [x] HTTP beacon handler
-- [x] Payload staging
-- [x] Exfiltration endpoint
-- [ ] Kubernetes deployment manifests
+### INBOUND Services (Attack targets)
+- [x] **DVWA Target** - Vulnerable web app for WAF testing
+- [ ] **WAF Tester Service** - Automated attack execution (TODO)
+- [ ] **Web Scanner Service** - Vulnerability scanning (TODO)
 
-### Sprint 25: DNS C2 Service
-- [ ] DNS tunneling handler
-- [ ] CoreDNS integration
+### Infrastructure
+- [x] Docker Compose deployment
+- [x] Traefik reverse proxy with routing
+- [x] Multi-tenant namespace isolation (design)
+- [ ] Kubernetes manifests (TODO)
+- [ ] Terraform modules (GCP done, AWS/Azure TODO)
 
-### Sprint 26: File Exfiltration
-- [ ] Cloud storage abstraction (S3/GCS/Azure/MinIO)
-- [ ] Chunked uploads
-
-### Sprint 27: Gateway & Security
-- [ ] Ingress with TLS
-- [ ] mTLS with Command Center
-
-### Sprint 28: Observability
-- [ ] Prometheus metrics
-- [ ] Grafana dashboards
+### Security
+- [x] HMAC request authentication
+- [x] Audit logging
+- [ ] mTLS with Master Server (TODO)
+- [ ] Rate limiting (TODO)
 
 ## Quick Start
 
@@ -141,10 +182,11 @@ kubectl apply -k kubernetes/overlays/aws
 ## Security Model
 
 1. **Tenant Isolation**: NetworkPolicies + separate namespaces
-2. **mTLS**: Authenticated traffic with Command Center
-3. **Rate Limiting**: Per-tenant limits
-4. **Audit Logging**: All C2 activity logged
-5. **Geo-Fencing**: Optional IP restrictions
+2. **HMAC Authentication**: Signed requests from authorized agents only
+3. **mTLS**: Optional mutual TLS with Master Server for results API
+4. **Rate Limiting**: Per-tenant limits to prevent abuse
+5. **Audit Logging**: All C2 activity logged for evidence
+6. **Geo-Fencing**: Optional IP restrictions per tenant
 
 ## Cost Optimization
 

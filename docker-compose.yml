@@ -178,7 +178,7 @@ services:
     restart: unless-stopped
 
   # ===========================================
-  # WAF TESTER SERVICE
+  # WAF TESTER SERVICE (Hybrid - Context-Aware)
   # ===========================================
   waf-tester:
     build:
@@ -186,22 +186,27 @@ services:
       dockerfile: Dockerfile
     container_name: relay-waf-tester
     environment:
+      - DATABASE_URL=postgresql://relay:relay@relay-db:5432/relay
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - LOG_LEVEL=info
+      - ENABLE_LLM_ANALYSIS=true
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}  # Optional for LLM fallback
     networks:
       - relay-net
     depends_on:
-      - redis
+      relay-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.waf-tester.rule=PathPrefix(`/waf`)"
+      - "traefik.http.routers.waf-tester.rule=PathPrefix(`/waf`) || PathPrefix(`/health`)"
       - "traefik.http.routers.waf-tester.entrypoints=web"
       - "traefik.http.services.waf-tester.loadbalancer.server.port=8443"
-      - "traefik.http.middlewares.waf-strip.stripprefix.prefixes=/waf"
-      - "traefik.http.routers.waf-tester.middlewares=waf-strip"
+      - "traefik.http.routers.waf-tester.priority=90"
     healthcheck:
-      test: ["CMD", "curl", "-f", "-k", "https://localhost:8443/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8443/health"]
       interval: 30s
       timeout: 10s
       retries: 3

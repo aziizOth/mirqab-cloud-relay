@@ -9,7 +9,12 @@ Key Responsibilities:
 2. Stage payloads for download
 3. Receive exfiltrated data
 4. Log all activity for validation evidence
-5. Report results back to Command Center
+5. Report results back to Master Server (OffenSight) - NOT Command Center
+
+Architecture Note:
+- Command Center = Mirqab management portal (licenses, feeds, CVEs)
+- Master Server = Customer's OffenSight instance (attack orchestration)
+- Cloud Relay = This service (external attack infrastructure)
 
 This is NOT a simulation - it handles real attack traffic in a controlled manner.
 """
@@ -46,7 +51,8 @@ log = structlog.get_logger()
 # =============================================================================
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "dev")
-COMMAND_CENTER_URL = os.getenv("COMMAND_CENTER_URL", "http://localhost:8000")
+# Master Server URL - the customer's OffenSight instance (NOT Mirqab Command Center)
+MASTER_SERVER_URL = os.getenv("MASTER_SERVER_URL", os.getenv("COMMAND_CENTER_URL", "http://localhost:8000"))
 SIGNING_KEY = os.getenv("SIGNING_KEY", "dev-key-change-in-production")
 GCS_BUCKET = os.getenv("GCS_BUCKET", "")
 
@@ -217,7 +223,7 @@ async def beacon_callback(
 
     # Report to Command Center (async)
     background_tasks.add_task(
-        report_beacon_to_command_center,
+        report_beacon_to_master,
         beacon_id,
         request,
         x_real_ip,
@@ -246,7 +252,7 @@ async def receive_task_result(
 
     # Report to Command Center
     background_tasks.add_task(
-        report_task_result_to_command_center,
+        report_task_result_to_master,
         result,
     )
 
@@ -382,7 +388,7 @@ async def receive_exfil(
 
     # Report to Command Center
     background_tasks.add_task(
-        report_exfil_to_command_center,
+        report_exfil_to_master,
         exfil_id,
         data,
         len(exfil_bytes),
@@ -464,7 +470,7 @@ async def health_check():
 # =============================================================================
 
 
-async def report_beacon_to_command_center(
+async def report_beacon_to_master(
     beacon_id: str,
     request: BeaconRequest,
     source_ip: str | None,
@@ -473,7 +479,7 @@ async def report_beacon_to_command_center(
     try:
         async with httpx.AsyncClient() as client:
             await client.post(
-                f"{COMMAND_CENTER_URL}/api/v1/telemetry/c2/beacon",
+                f"{MASTER_SERVER_URL}/api/v1/telemetry/c2/beacon",
                 json={
                     "beacon_id": beacon_id,
                     "agent_id": request.agent_id,
@@ -485,23 +491,23 @@ async def report_beacon_to_command_center(
                 timeout=10.0,
             )
     except Exception as e:
-        log.error("command_center_report_failed", error=str(e), beacon_id=beacon_id)
+        log.error("master_report_failed", error=str(e), beacon_id=beacon_id)
 
 
-async def report_task_result_to_command_center(result: TaskResult):
+async def report_task_result_to_master(result: TaskResult):
     """Report task result to Command Center."""
     try:
         async with httpx.AsyncClient() as client:
             await client.post(
-                f"{COMMAND_CENTER_URL}/api/v1/telemetry/c2/task-result",
+                f"{MASTER_SERVER_URL}/api/v1/telemetry/c2/task-result",
                 json=result.model_dump(mode="json"),
                 timeout=10.0,
             )
     except Exception as e:
-        log.error("command_center_report_failed", error=str(e), task_id=result.task_id)
+        log.error("master_report_failed", error=str(e), task_id=result.task_id)
 
 
-async def report_exfil_to_command_center(
+async def report_exfil_to_master(
     exfil_id: str,
     data: ExfilData,
     size: int,
@@ -510,7 +516,7 @@ async def report_exfil_to_command_center(
     try:
         async with httpx.AsyncClient() as client:
             await client.post(
-                f"{COMMAND_CENTER_URL}/api/v1/telemetry/c2/exfil",
+                f"{MASTER_SERVER_URL}/api/v1/telemetry/c2/exfil",
                 json={
                     "exfil_id": exfil_id,
                     "agent_id": data.agent_id,
@@ -524,7 +530,7 @@ async def report_exfil_to_command_center(
                 timeout=10.0,
             )
     except Exception as e:
-        log.error("command_center_report_failed", error=str(e), exfil_id=exfil_id)
+        log.error("master_report_failed", error=str(e), exfil_id=exfil_id)
 
 
 async def store_exfil_to_gcs(exfil_id: str, data: ExfilData, content: bytes):
