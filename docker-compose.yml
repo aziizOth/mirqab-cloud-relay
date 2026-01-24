@@ -1,5 +1,8 @@
 # Mirqab Cloud Relay - Local Development
 # Docker Compose for running all relay services locally
+# Updated: 2026-01-24 - Added Payload Service with PostgreSQL
+#   - MASTER_SERVER_URL = Customer's OffenSight instance (attack orchestration)
+#   - Command Center = Mirqab management portal (licenses, feeds) - NOT used here
 
 version: '3.8'
 
@@ -16,17 +19,69 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
-      - "--entrypoints.smtp.address=:587"
       - "--accesslog=true"
       - "--log.level=INFO"
     ports:
-      - "80:80"
-      - "587:587"
-      - "8080:8080"  # Traefik dashboard
+      - "8180:80"      # Changed from 80 to avoid conflicts
+      - "8280:8080"    # Traefik dashboard
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - relay-net
+    restart: unless-stopped
+
+  # ===========================================
+  # POSTGRESQL DATABASE
+  # ===========================================
+  relay-db:
+    image: postgres:15-alpine
+    container_name: relay-db
+    environment:
+      - POSTGRES_USER=relay
+      - POSTGRES_PASSWORD=relay
+      - POSTGRES_DB=relay
+    volumes:
+      - relay-db-data:/var/lib/postgresql/data
+    networks:
+      - relay-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ===========================================
+  # PAYLOAD SERVICE (NEW - for file downloads)
+  # ===========================================
+  payload-service:
+    build:
+      context: ./services/payload-service
+      dockerfile: Dockerfile
+    container_name: relay-payload
+    environment:
+      - DATABASE_URL=postgresql://relay:relay@relay-db:5432/relay
+      - STORAGE_PATH=/payloads
+      - LOG_LEVEL=INFO
+    volumes:
+      - payload-storage:/payloads
+    depends_on:
+      relay-db:
+        condition: service_healthy
+    networks:
+      - relay-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.payload.rule=PathPrefix(`/download`) || PathPrefix(`/stage`) || PathPrefix(`/payloads`)"
+      - "traefik.http.routers.payload.entrypoints=web"
+      - "traefik.http.services.payload.loadbalancer.server.port=8000"
+      - "traefik.http.routers.payload.priority=100"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
 
   # ===========================================
@@ -39,21 +94,23 @@ services:
     container_name: relay-http-c2
     environment:
       - ENVIRONMENT=local
-      - COMMAND_CENTER_URL=http://host.docker.internal:8000
+      - MASTER_SERVER_URL=http://host.docker.internal:8000  # OffenSight instance
       - SIGNING_KEY=${SIGNING_KEY:-local-dev-key-change-me}
       - STORAGE_BACKEND=local
     networks:
       - relay-net
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.http-c2.rule=PathPrefix(`/beacon`) || PathPrefix(`/exfil`) || PathPrefix(`/download`) || PathPrefix(`/stage`)"
+      - "traefik.http.routers.http-c2.rule=PathPrefix(`/beacon`) || PathPrefix(`/exfil`)"
       - "traefik.http.routers.http-c2.entrypoints=web"
       - "traefik.http.services.http-c2.loadbalancer.server.port=8080"
+      - "traefik.http.routers.http-c2.priority=50"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/health', timeout=2)"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 15s
     restart: unless-stopped
 
   # ===========================================
@@ -84,10 +141,11 @@ services:
       - "traefik.http.middlewares.smtp-strip.stripprefix.prefixes=/phishing"
       - "traefik.http.routers.smtp.middlewares=smtp-strip"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8081/health', timeout=2)"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 15s
     restart: unless-stopped
 
   # ===========================================
@@ -119,9 +177,64 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # ===========================================
+  # WAF TESTER SERVICE
+  # ===========================================
+  waf-tester:
+    build:
+      context: ./services/waf-tester
+      dockerfile: Dockerfile
+    container_name: relay-waf-tester
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - LOG_LEVEL=info
+    networks:
+      - relay-net
+    depends_on:
+      - redis
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.waf-tester.rule=PathPrefix(`/waf`)"
+      - "traefik.http.routers.waf-tester.entrypoints=web"
+      - "traefik.http.services.waf-tester.loadbalancer.server.port=8443"
+      - "traefik.http.middlewares.waf-strip.stripprefix.prefixes=/waf"
+      - "traefik.http.routers.waf-tester.middlewares=waf-strip"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-k", "https://localhost:8443/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # ===========================================
+  # DVWA - Vulnerable Web App for WAF Testing
+  # ===========================================
+  dvwa:
+    image: vulnerables/web-dvwa:latest
+    container_name: relay-dvwa
+    environment:
+      - RECAPTCHA_PRIV_KEY=
+      - RECAPTCHA_PUB_KEY=
+      - SECURITY_LEVEL=low
+      - PHPIDS_ENABLED=0
+    networks:
+      - relay-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dvwa.rule=PathPrefix(`/dvwa`)"
+      - "traefik.http.routers.dvwa.entrypoints=web"
+      - "traefik.http.services.dvwa.loadbalancer.server.port=80"
+      - "traefik.http.middlewares.dvwa-strip.stripprefix.prefixes=/dvwa"
+      - "traefik.http.routers.dvwa.middlewares=dvwa-strip"
+    restart: unless-stopped
+
 networks:
   relay-net:
     driver: bridge
 
 volumes:
   relay-data:
+  relay-db-data:
+  payload-storage:
