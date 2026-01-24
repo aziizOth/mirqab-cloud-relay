@@ -101,7 +101,7 @@ services:
       - relay-net
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.http-c2.rule=PathPrefix(`/beacon`) || PathPrefix(`/exfil`)"
+      - "traefik.http.routers.http-c2.rule=PathPrefix(`/beacon`) || PathPrefix(`/exfil`) || PathPrefix(`/test`) || PathPrefix(`/download`) || PathPrefix(`/stage`) || PathPrefix(`/health`)"
       - "traefik.http.routers.http-c2.entrypoints=web"
       - "traefik.http.services.http-c2.loadbalancer.server.port=8080"
       - "traefik.http.routers.http-c2.priority=50"
