@@ -253,14 +253,15 @@ services:
       - LOG_LEVEL=INFO
     volumes:
       - c2-payloads:/payloads
-    depends_on:
-      - sliver
-      - metasploit
+    # Note: Sliver/Metasploit are optional - c2-gateway works standalone with simulated payloads
+    # depends_on:
+    #   - sliver
+    #   - metasploit
     networks:
       - relay-net
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.c2-gateway.rule=PathPrefix(`/api/v1/payloads`) || PathPrefix(`/api/v1/sessions`) || PathPrefix(`/api/v1/c2`) || PathPrefix(`/sliver`) || PathPrefix(`/msf`)"
+      - "traefik.http.routers.c2-gateway.rule=PathPrefix(`/api/v1/payloads`) || PathPrefix(`/api/v1/sessions`) || PathPrefix(`/api/v1/c2`) || PathPrefix(`/c2-payloads`) || PathPrefix(`/sliver`) || PathPrefix(`/msf`)"
       - "traefik.http.routers.c2-gateway.entrypoints=web"
       - "traefik.http.services.c2-gateway.loadbalancer.server.port=8000"
       - "traefik.http.routers.c2-gateway.priority=95"

@@ -19,6 +19,8 @@ scp -r services/http-c2 ${VM_USER}@${VM_HOST}:${REMOTE_PATH}/services/
 scp -r services/smtp-phishing ${VM_USER}@${VM_HOST}:${REMOTE_PATH}/services/
 scp -r services/waf-tester ${VM_USER}@${VM_HOST}:${REMOTE_PATH}/services/
 scp -r services/payload-service ${VM_USER}@${VM_HOST}:${REMOTE_PATH}/services/
+scp -r services/c2-gateway ${VM_USER}@${VM_HOST}:${REMOTE_PATH}/services/
+scp -r services/sliver ${VM_USER}@${VM_HOST}:${REMOTE_PATH}/services/
 
 # SSH and restart services
 echo "3. Restarting Docker services on VM..."

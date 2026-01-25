@@ -442,7 +442,7 @@ async def generate_payload(req: PayloadRequest, background_tasks: BackgroundTask
 
     return PayloadResponse(
         payload_id=payload_id,
-        payload_url=f"/payloads/{req.tenant_id}/{output_path.name}",
+        payload_url=f"/c2-payloads/{req.tenant_id}/{output_path.name}",
         framework=req.framework,
         protocol=req.protocol,
         platform=req.platform,
@@ -453,9 +453,9 @@ async def generate_payload(req: PayloadRequest, background_tasks: BackgroundTask
     )
 
 
-@app.get("/payloads/{tenant_id}/{filename}")
+@app.get("/c2-payloads/{tenant_id}/{filename}")
 async def download_payload(tenant_id: str, filename: str):
-    """Download generated payload"""
+    """Download generated C2 payload"""
     payload_path = PAYLOAD_DIR / tenant_id / filename
 
     if not payload_path.exists():
