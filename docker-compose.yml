@@ -235,6 +235,108 @@ services:
       - "traefik.http.routers.dvwa.middlewares=dvwa-strip"
     restart: unless-stopped
 
+  # ===========================================
+  # C2 GATEWAY - Unified C2 API with Safety Controls
+  # ===========================================
+  c2-gateway:
+    build:
+      context: ./services/c2-gateway
+      dockerfile: Dockerfile
+    container_name: relay-c2-gateway
+    environment:
+      - CLOUD_RELAY_HOST=${CLOUD_RELAY_HOST:-192.168.100.67}
+      - CLOUD_RELAY_DOMAIN=${CLOUD_RELAY_DOMAIN:-relay.local}
+      - SLIVER_HOST=sliver
+      - SLIVER_PORT=31337
+      - MSF_HOST=metasploit
+      - MSF_PORT=4444
+      - LOG_LEVEL=INFO
+    volumes:
+      - c2-payloads:/payloads
+    depends_on:
+      - sliver
+      - metasploit
+    networks:
+      - relay-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.c2-gateway.rule=PathPrefix(`/api/v1/payloads`) || PathPrefix(`/api/v1/sessions`) || PathPrefix(`/api/v1/c2`) || PathPrefix(`/sliver`) || PathPrefix(`/msf`)"
+      - "traefik.http.routers.c2-gateway.entrypoints=web"
+      - "traefik.http.services.c2-gateway.loadbalancer.server.port=8000"
+      - "traefik.http.routers.c2-gateway.priority=95"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # ===========================================
+  # SLIVER C2 SERVER
+  # Real C2 framework for MITRE T1071.001/T1071.004
+  # ===========================================
+  sliver:
+    image: ghcr.io/bishopfox/sliver:latest
+    container_name: relay-sliver
+    environment:
+      - SLIVER_NO_MULTIPLAYER=true
+    volumes:
+      - sliver-data:/home/sliver/.sliver
+      - c2-payloads:/payloads
+    ports:
+      - "31337:31337"   # gRPC API
+      - "8443:443"      # HTTPS implant listener
+      - "8888:8888"     # HTTP implant listener
+      - "5353:53/udp"   # DNS implant listener
+    networks:
+      - relay-net
+    labels:
+      - "traefik.enable=true"
+      # Sliver HTTPS listener
+      - "traefik.http.routers.sliver-https.rule=PathPrefix(`/sliver/implant`)"
+      - "traefik.http.routers.sliver-https.entrypoints=web"
+      - "traefik.http.services.sliver-https.loadbalancer.server.port=443"
+      - "traefik.http.routers.sliver-https.priority=85"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "31337"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # ===========================================
+  # METASPLOIT FRAMEWORK
+  # Real C2 framework for MITRE T1071.001/T1095
+  # ===========================================
+  metasploit:
+    image: metasploitframework/metasploit-framework:latest
+    container_name: relay-metasploit
+    environment:
+      - DATABASE_URL=postgresql://relay:relay@relay-db:5432/msf
+    volumes:
+      - msf-data:/root/.msf4
+      - c2-payloads:/payloads
+    ports:
+      - "4444:4444"     # Default handler
+      - "4445:4445"     # HTTPS handler
+      - "5555:5555"     # Additional handler
+    depends_on:
+      relay-db:
+        condition: service_healthy
+    networks:
+      - relay-net
+    # Start with RPC daemon for API access
+    command: ["./msfconsole", "-q", "-x", "load msgrpc ServerHost=0.0.0.0 Pass=msf"]
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "55553"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+
 networks:
   relay-net:
     driver: bridge
@@ -243,3 +345,6 @@ volumes:
   relay-data:
   relay-db-data:
   payload-storage:
+  c2-payloads:       # Shared C2 payload storage
+  sliver-data:       # Sliver server data
+  msf-data:          # Metasploit data
