@@ -964,6 +964,57 @@ traefik:     up
 
 ---
 
+## CI/CD Pipelines (2026-01-28)
+
+### GitHub Actions Workflows
+
+| Workflow | File | Trigger | Jobs |
+|----------|------|---------|------|
+| **CI** | `.github/workflows/ci.yml` | Push/PR to master | lint (ruff + staticcheck), test (pytest + Go), build 6 images, security scan (Trivy + hardening) |
+| **Deploy VM** | `.github/workflows/deploy-vm.yml` | Manual (workflow_dispatch) | SSH → git pull → build → deploy → health checks → validation |
+| **Build Images** | `.github/workflows/build-images.yml` | Version tags (`v*`) | Build all services, push to `ghcr.io/aziizOth/cloud-relay/<service>` |
+
+### CI Pipeline Detail
+
+```
+push/PR to master
+  ├── lint          Python (ruff) + Go (staticcheck)
+  ├── test          pytest + Go unit tests
+  ├── build         6 service images (matrix strategy)
+  └── security-scan validate-hardening.sh + Trivy filesystem scan
+```
+
+### VM Deploy Pipeline
+
+Triggered manually from GitHub Actions UI. Requires secrets: `VM_SSH_KEY`, `VM_HOST`, `VM_USER`.
+
+```
+workflow_dispatch
+  ├── SSH to VM
+  ├── git pull origin master
+  ├── Generate secrets if missing
+  ├── docker compose build && up -d
+  ├── Optional: start monitoring stack
+  ├── Health check (API Gateway + Traefik)
+  └── validate-hardening.sh (12 checks)
+```
+
+### Makefile
+
+Local development shortcuts at project root:
+
+| Command | Action |
+|---------|--------|
+| `make build` | Build all Docker images |
+| `make up` / `make down` | Start / stop services |
+| `make monitoring` | Start Prometheus + Grafana |
+| `make test` / `make lint` | Run tests / linter |
+| `make validate` | Run hardening validation |
+| `make deploy` | SSH deploy to VM with health check |
+| `make clean` | Teardown with volume cleanup |
+
+---
+
 ## Summary
 
 | Feature | Implementation | Status |
@@ -990,3 +1041,7 @@ traefik:     up
 | **Monitoring Stack** | Prometheus + Grafana (Docker Compose overlay) | IMPLEMENTED |
 | **Alert Rules** | 7 rules — gateway, latency, auth, proxy, rate limits | IMPLEMENTED |
 | **Grafana Dashboards** | API Gateway + Cloud Relay Overview (auto-provisioned) | IMPLEMENTED |
+| **CI Pipeline** | GitHub Actions — lint, test, build, security scan on push/PR | IMPLEMENTED |
+| **VM Deploy Pipeline** | GitHub Actions — SSH deploy with health checks + validation | IMPLEMENTED |
+| **Image Registry** | Build & push to ghcr.io on version tags | IMPLEMENTED |
+| **Makefile** | Local build/test/deploy/monitoring shortcuts | IMPLEMENTED |
