@@ -21,6 +21,13 @@ entryPoints:
       tls:
         options: strict-tls13
 
+metrics:
+  prometheus:
+    entryPoint: traefik
+    addEntryPointsLabels: true
+    addRoutersLabels: true
+    addServicesLabels: true
+
 log:
   level: INFO
 

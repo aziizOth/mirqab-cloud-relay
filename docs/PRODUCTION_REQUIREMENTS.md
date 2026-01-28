@@ -379,7 +379,7 @@ async def enforce_quota(
 - [ ] TLS 1.3 enforced
 - [ ] WAF rules configured
 - [ ] DDoS protection enabled
-- [ ] Monitoring dashboards created
+- [x] Monitoring dashboards created
 - [ ] Alerting configured
 - [ ] Backup procedures tested
 - [ ] DR plan documented
@@ -523,9 +523,18 @@ PAYLOAD_SERVER_URL=http://payload-server:8000
 - [x] Hardening validation script (`scripts/validate-hardening.sh`) — 12/12 checks pass
 - [ ] External secrets operator (HashiCorp Vault / Alibaba KMS) — deferred to production
 
-### Phase 3: Operationalization - PENDING
-- [ ] Monitoring dashboards (Prometheus/Grafana)
-- [ ] Alerting rules
+### Phase 3: Operationalization - IN PROGRESS
+- [x] Prometheus metrics in API Gateway (`metrics.py` — 8 custom metrics with tenant labels)
+- [x] `/metrics` endpoint exposing Prometheus format
+- [x] Middleware instrumented — request count, duration, auth failures, rate limits, proxy errors
+- [x] Docker Compose monitoring overlay (`docker-compose.monitoring.yml`) — Prometheus + Grafana
+- [x] Prometheus scrape config for api-gateway, traefik, self
+- [x] Alert rules — 7 rules (GatewayDown, HighErrorRate, HighLatencyP95, RateLimitSpike, AuthFailureSpike, BackendProxyErrors, TraefikDown)
+- [x] Grafana auto-provisioned with Prometheus datasource + 2 dashboards
+- [x] API Gateway dashboard — request rate, latency percentiles, auth failures, proxy errors, tenant breakdown
+- [x] Cloud Relay Overview dashboard — service health, error rate gauge, top tenants, rate limit events
+- [x] Traefik metrics enabled (entrypoints, routers, services labels)
+- [x] Deployed to VM — all 3 scrape targets UP
 - [ ] Backup automation
 - [ ] CI/CD pipelines
 
@@ -541,6 +550,7 @@ PAYLOAD_SERVER_URL=http://payload-server:8000
 | `rate_limiter.py` | Redis-based distributed rate limiting |
 | `quota.py` | Quota enforcement (agents, tasks, features) |
 | `middleware.py` | Security middleware combining all checks |
+| `metrics.py` | Prometheus metrics definitions (counters, histograms, gauges) |
 | `models.py` | Data models (Tenant, TierLimits, etc.) |
 | `Dockerfile` | Container build |
 | `requirements.txt` | Python dependencies |

@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: "api-gateway"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api-gateway:8000"]
+        labels:
+          service: api-gateway
+
+  - job_name: "traefik"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["traefik:8080"]
+        labels:
+          service: traefik
+
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]

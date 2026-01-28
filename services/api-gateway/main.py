@@ -12,16 +12,19 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 
 import httpx
 import redis.asyncio as redis
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from auth import create_test_tenant, TEST_API_KEY, TEST_API_SECRET
 from middleware import CORSMiddleware, RequestIDMiddleware, SecurityMiddleware
 from models import TenantTier
+from metrics import PROXY_DURATION, PROXY_ERRORS
 
 # Configure logging
 logging.basicConfig(
@@ -155,6 +158,12 @@ async def ready():
         status_code=503,
         content={"status": "not_ready", "redis": "not_initialized"},
     )
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus metrics endpoint."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # API version info
@@ -423,14 +432,19 @@ async def proxy_to_backend(request: Request, path: str):
         forward_headers["X-Request-ID"] = context.request_id
         forward_headers["X-Correlation-ID"] = context.correlation_id
 
+    # Determine backend name for metrics
+    backend_name = path.split("/")[0] if path else "unknown"
+
     try:
         # Forward request to Traefik backend
+        proxy_start = time.time()
         backend_response = await http_client.request(
             method=request.method,
             url=target_url,
             headers=forward_headers,
             content=body,
         )
+        PROXY_DURATION.labels(backend=backend_name).observe(time.time() - proxy_start)
 
         # Build response headers
         response_headers = dict(backend_response.headers)
@@ -456,6 +470,7 @@ async def proxy_to_backend(request: Request, path: str):
         )
 
     except httpx.ConnectError as e:
+        PROXY_ERRORS.labels(backend=backend_name, error_type="connect").inc()
         logger.error(
             "Backend connection failed",
             extra={"path": f"/{path}", "backend": target_url, "error": str(e)},
@@ -468,6 +483,7 @@ async def proxy_to_backend(request: Request, path: str):
             },
         )
     except httpx.TimeoutException:
+        PROXY_ERRORS.labels(backend=backend_name, error_type="timeout").inc()
         logger.error(
             "Backend request timeout",
             extra={"path": f"/{path}", "backend": target_url},

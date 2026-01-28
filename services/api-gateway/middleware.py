@@ -21,6 +21,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from auth import AuthenticationError, AuthorizationError, Authenticator, Authorizer
+from metrics import (
+    ACTIVE_REQUESTS, AUTH_FAILURES, QUOTA_EXCEEDED, RATE_LIMIT_HITS,
+    REQUEST_COUNT, REQUEST_DURATION,
+)
 from models import AuditEvent, RequestContext
 from quota import QuotaEnforcer
 from rate_limiter import RateLimiter
@@ -98,14 +102,21 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         request.state.correlation_id = correlation_id
 
+        # Normalize path for metric labels (avoid high cardinality)
+        metric_path = self._normalize_path(request.url.path)
+
         # Check if public endpoint
         if self._is_public_endpoint(request.url.path):
             return await call_next(request)
 
+        tenant_id = "unknown"
         try:
             # 1. Authenticate request
             context = await self._authenticate_request(request)
             request.state.context = context
+            tenant_id = context.tenant_id
+
+            ACTIVE_REQUESTS.labels(tenant_id=tenant_id).inc()
 
             # 2. Validate signature (if required)
             if self.require_signature:
@@ -117,6 +128,11 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                 context.tenant.tier,
             )
             if not rate_result.allowed:
+                RATE_LIMIT_HITS.labels(tenant_id=tenant_id).inc()
+                REQUEST_COUNT.labels(
+                    method=request.method, path=metric_path,
+                    status="429", tenant_id=tenant_id,
+                ).inc()
                 return self._rate_limit_response(rate_result, request_id)
 
             context.rate_limit_remaining = rate_result.remaining
@@ -131,6 +147,11 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                     feature,
                 )
                 if not quota_result.allowed:
+                    QUOTA_EXCEEDED.labels(tenant_id=tenant_id, feature=feature).inc()
+                    REQUEST_COUNT.labels(
+                        method=request.method, path=metric_path,
+                        status="429", tenant_id=tenant_id,
+                    ).inc()
                     return self._quota_exceeded_response(quota_result, request_id)
 
             # 6. Authorize feature access
@@ -148,7 +169,17 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             # 8. Forward request
             response = await call_next(request)
 
-            # 9. Add rate limit headers
+            # 9. Record metrics
+            duration = time.time() - start_time
+            REQUEST_COUNT.labels(
+                method=request.method, path=metric_path,
+                status=str(response.status_code), tenant_id=tenant_id,
+            ).inc()
+            REQUEST_DURATION.labels(
+                method=request.method, path=metric_path, tenant_id=tenant_id,
+            ).observe(duration)
+
+            # 10. Add rate limit headers
             rate_headers = await self.rate_limiter.get_rate_limit_headers(
                 context.tenant_id,
                 context.tenant.tier,
@@ -156,17 +187,22 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             for header, value in rate_headers.items():
                 response.headers[header] = value
 
-            # 10. Log audit event
+            # 11. Log audit event
             await self._log_audit_event(
                 request=request,
                 context=context,
                 response=response,
-                duration_ms=int((time.time() - start_time) * 1000),
+                duration_ms=int(duration * 1000),
             )
 
             return response
 
         except AuthenticationError as e:
+            AUTH_FAILURES.labels(reason=e.code).inc()
+            REQUEST_COUNT.labels(
+                method=request.method, path=metric_path,
+                status="401", tenant_id=tenant_id,
+            ).inc()
             logger.warning(
                 "Authentication failed",
                 extra={
@@ -188,6 +224,11 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             )
 
         except AuthorizationError as e:
+            AUTH_FAILURES.labels(reason=e.code).inc()
+            REQUEST_COUNT.labels(
+                method=request.method, path=metric_path,
+                status="403", tenant_id=tenant_id,
+            ).inc()
             logger.warning(
                 "Authorization failed",
                 extra={
@@ -208,6 +249,11 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             )
 
         except SignatureValidationError as e:
+            AUTH_FAILURES.labels(reason="invalid_signature").inc()
+            REQUEST_COUNT.labels(
+                method=request.method, path=metric_path,
+                status="401", tenant_id=tenant_id,
+            ).inc()
             logger.warning(
                 "Signature validation failed",
                 extra={
@@ -228,6 +274,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             )
 
         except Exception as e:
+            REQUEST_COUNT.labels(
+                method=request.method, path=metric_path,
+                status="500", tenant_id=tenant_id,
+            ).inc()
             logger.exception(
                 "Unexpected error in security middleware",
                 extra={"request_id": request_id, "error": str(e)},
@@ -240,6 +290,26 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                     "request_id": request_id,
                 },
             )
+
+        finally:
+            if tenant_id != "unknown":
+                ACTIVE_REQUESTS.labels(tenant_id=tenant_id).dec()
+
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """Normalize request path for metric labels to avoid high cardinality."""
+        # Collapse IDs/UUIDs in paths to placeholders
+        parts = path.strip("/").split("/")
+        normalized = []
+        for part in parts:
+            # Collapse UUIDs, hex strings, and numeric IDs
+            if len(part) > 8 and all(c in "0123456789abcdef-" for c in part.lower()):
+                normalized.append(":id")
+            elif part.isdigit():
+                normalized.append(":id")
+            else:
+                normalized.append(part)
+        return "/" + "/".join(normalized) if normalized else "/"
 
     def _is_public_endpoint(self, path: str) -> bool:
         """Check if endpoint is public (no auth required)."""
