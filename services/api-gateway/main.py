@@ -14,11 +14,12 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
+import httpx
 import redis.asyncio as redis
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
-from auth import create_test_tenant
+from auth import create_test_tenant, TEST_API_KEY, TEST_API_SECRET
 from middleware import CORSMiddleware, RequestIDMiddleware, SecurityMiddleware
 from models import TenantTier
 
@@ -42,6 +43,12 @@ HTTP_C2_URL = os.getenv("HTTP_C2_URL", "http://http-c2:8080")
 WAF_TESTER_URL = os.getenv("WAF_TESTER_URL", "http://waf-tester:8080")
 PAYLOAD_SERVER_URL = os.getenv("PAYLOAD_SERVER_URL", "http://payload-server:8080")
 
+# Traefik backend URL (for proxying authenticated requests to services)
+TRAEFIK_BACKEND_URL = os.getenv("TRAEFIK_BACKEND_URL", "http://traefik:80")
+
+# Shared httpx client (initialized in lifespan)
+http_client: httpx.AsyncClient | None = None
+
 # Redis client (initialized in lifespan)
 redis_client: redis.Redis | None = None
 
@@ -50,6 +57,8 @@ redis_client: redis.Redis | None = None
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     global redis_client
+
+    global http_client
 
     # Startup
     logger.info("Starting Cloud Relay API Gateway...")
@@ -63,16 +72,29 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to connect to Redis: {e}")
         raise
 
+    # Create shared HTTP client for proxying
+    http_client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)
+    logger.info(f"Proxy backend: {TRAEFIK_BACKEND_URL}")
+
     # Create test tenant in debug mode
     if DEBUG_MODE:
-        logger.warning("Debug mode enabled - creating test tenant")
-        test_tenant = create_test_tenant("test-tenant", TenantTier.PROFESSIONAL)
-        logger.info(f"Test tenant created: {test_tenant.id}, API Key: {test_tenant.api_key[:8]}...")
+        logger.warning("Debug mode enabled - creating test tenant with fixed credentials")
+        test_tenant = create_test_tenant(
+            "test-tenant",
+            TenantTier.PROFESSIONAL,
+            api_key=TEST_API_KEY,
+            api_secret=TEST_API_SECRET,
+        )
+        logger.info(f"Test tenant created: {test_tenant.id}")
+        logger.info(f"  API Key: {TEST_API_KEY}")
+        logger.info(f"  API Secret: {TEST_API_SECRET}")
 
     yield
 
     # Shutdown
     logger.info("Shutting down API Gateway...")
+    if http_client:
+        await http_client.aclose()
     if redis_client:
         await redis_client.close()
     logger.info("Shutdown complete")
@@ -338,6 +360,125 @@ def _get_backend_url(task_type: str) -> str | None:
         "payload": PAYLOAD_SERVER_URL,
     }
     return mapping.get(task_type)
+
+
+# ==============================================
+# REVERSE PROXY - Forward authenticated requests
+# to backend services via Traefik
+# ==============================================
+
+# Paths that are handled directly by the API Gateway (not proxied)
+GATEWAY_PATHS = {
+    "/health", "/healthz", "/ready", "/metrics",
+    "/api/v1", "/api/v1/quota",
+}
+GATEWAY_PREFIXES = (
+    "/api/v1/tasks",
+    "/api/v1/c2/kill",
+)
+
+
+@app.api_route(
+    "/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
+)
+async def proxy_to_backend(request: Request, path: str):
+    """
+    Reverse proxy: forward authenticated requests to backend services via Traefik.
+
+    After the security middleware validates authentication, rate limits, and quotas,
+    this endpoint forwards the request to the appropriate backend service.
+
+    This allows OffenSight to send requests to:
+      - /waf/test       → WAF Tester (via Traefik)
+      - /beacon         → HTTP C2 (via Traefik)
+      - /exfil          → HTTP C2 (via Traefik)
+      - /phishing/send  → SMTP Phishing (via Traefik)
+      - /stage          → Payload Service (via Traefik)
+      - /download/*     → Payload Service (via Traefik)
+    """
+    # Build target URL
+    target_url = f"{TRAEFIK_BACKEND_URL}/{path}"
+    if request.url.query:
+        target_url += f"?{request.url.query}"
+
+    # Get tenant context (set by security middleware)
+    context = getattr(request.state, "context", None)
+
+    # Read body
+    body = await request.body()
+
+    # Build headers (forward relevant headers, add tenant context)
+    forward_headers = {}
+    for key, value in request.headers.items():
+        # Skip hop-by-hop headers and auth headers (already validated)
+        if key.lower() in ("host", "connection", "transfer-encoding", "content-length"):
+            continue
+        forward_headers[key] = value
+
+    # Add verified tenant context headers for downstream services
+    if context:
+        forward_headers["X-Verified-Tenant-ID"] = context.tenant_id
+        forward_headers["X-Verified-Tier"] = context.tenant.tier.value
+        forward_headers["X-Request-ID"] = context.request_id
+        forward_headers["X-Correlation-ID"] = context.correlation_id
+
+    try:
+        # Forward request to Traefik backend
+        backend_response = await http_client.request(
+            method=request.method,
+            url=target_url,
+            headers=forward_headers,
+            content=body,
+        )
+
+        # Build response headers
+        response_headers = dict(backend_response.headers)
+        # Remove hop-by-hop headers
+        for h in ("transfer-encoding", "connection", "content-encoding"):
+            response_headers.pop(h, None)
+
+        logger.info(
+            "Proxied request",
+            extra={
+                "tenant_id": context.tenant_id if context else "anonymous",
+                "method": request.method,
+                "path": f"/{path}",
+                "backend": target_url,
+                "status": backend_response.status_code,
+            },
+        )
+
+        return Response(
+            content=backend_response.content,
+            status_code=backend_response.status_code,
+            headers=response_headers,
+        )
+
+    except httpx.ConnectError as e:
+        logger.error(
+            "Backend connection failed",
+            extra={"path": f"/{path}", "backend": target_url, "error": str(e)},
+        )
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": "bad_gateway",
+                "message": f"Backend service unavailable: /{path}",
+            },
+        )
+    except httpx.TimeoutException:
+        logger.error(
+            "Backend request timeout",
+            extra={"path": f"/{path}", "backend": target_url},
+        )
+        return JSONResponse(
+            status_code=504,
+            content={
+                "error": "gateway_timeout",
+                "message": f"Backend service timeout: /{path}",
+            },
+        )
 
 
 # Error handlers

@@ -23,6 +23,7 @@ services:
       - HTTP_C2_URL=http://http-c2:8080
       - WAF_TESTER_URL=http://waf-tester:8443
       - PAYLOAD_SERVER_URL=http://payload-service:8000
+      - TRAEFIK_BACKEND_URL=http://traefik:80
       - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8000
     depends_on:
       redis:

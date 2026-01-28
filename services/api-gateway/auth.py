@@ -332,6 +332,8 @@ def get_tenant(tenant_id: str) -> Tenant | None:
 def create_test_tenant(
     tenant_id: str,
     tier: TenantTier = TenantTier.PROFESSIONAL,
+    api_key: str | None = None,
+    api_secret: str | None = None,
 ) -> Tenant:
     """Create a test tenant for development."""
     import secrets
@@ -340,10 +342,15 @@ def create_test_tenant(
         id=tenant_id,
         name=f"Test Tenant {tenant_id}",
         tier=tier,
-        api_key=secrets.token_urlsafe(32),
-        api_secret=secrets.token_urlsafe(32),
+        api_key=api_key or secrets.token_urlsafe(32),
+        api_secret=api_secret or secrets.token_urlsafe(32),
         active=True,
         created_at=datetime.utcnow(),
     )
     register_tenant(tenant)
     return tenant
+
+
+# Fixed test credentials for integration testing
+TEST_API_KEY = "cloud-relay-test-api-key-2026"
+TEST_API_SECRET = "cloud-relay-test-api-secret-2026"
