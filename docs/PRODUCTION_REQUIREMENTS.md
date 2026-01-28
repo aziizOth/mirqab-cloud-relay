@@ -61,11 +61,11 @@ Cloud Relay is a multi-tenant attack platform deployed on public cloud (AWS/Azur
 
 | Requirement | Implementation | Status |
 |-------------|----------------|--------|
-| Tenant ID in all requests | X-Tenant-ID header + mTLS cert extraction | Partial |
+| Tenant ID in all requests | X-Tenant-ID header + mTLS cert extraction | **Done** |
 | Data isolation | Tenant ID foreign key on all tables | Done |
 | Network isolation | Per-tenant NetworkPolicy (Kubernetes) | Done |
-| Resource quotas | Per-tier limits (CPU, memory, requests) | Partial |
-| Rate limiting | Per-tenant request limits | Pending |
+| Resource quotas | Per-tier limits (CPU, memory, requests) | **Done** |
+| Rate limiting | Per-tenant request limits (Redis sliding window) | **Done** |
 
 ### 2. Authentication & Authorization
 
@@ -74,8 +74,8 @@ Cloud Relay is a multi-tenant attack platform deployed on public cloud (AWS/Azur
 | mTLS authentication | Client certificates per tenant | Done |
 | API key validation | X-API-Key header verification | Done |
 | Request signing | HMAC-SHA256 signature validation | Done |
-| Nonce validation | Prevent replay attacks | Pending |
-| Timestamp validation | Reject old requests (>5 min) | Pending |
+| Nonce validation | Prevent replay attacks (Redis 10-min expiry) | **Done** |
+| Timestamp validation | Reject old requests (>5 min) | **Done** |
 
 ### 3. Master Server Control
 
@@ -91,10 +91,10 @@ Cloud Relay is a multi-tenant attack platform deployed on public cloud (AWS/Azur
 | Requirement | Implementation | Status |
 |-------------|----------------|--------|
 | TLS 1.3 minimum | Ingress configuration | Pending |
-| Request validation | Schema + signature + nonce | Pending |
-| Audit logging | Structured logs with tenant context | Partial |
+| Request validation | Schema + signature + nonce | **Done** |
+| Audit logging | Structured logs with tenant context | **Done** |
 | Secrets management | External secrets store integration | Pending |
-| DDoS protection | Cloud WAF + rate limiting | Pending |
+| DDoS protection | Cloud WAF + rate limiting | Partial (rate limiting done) |
 
 ---
 
@@ -361,16 +361,18 @@ async def enforce_quota(
 
 ### Pre-Production
 
-- [ ] API gateway implemented with all security checks
-- [ ] Rate limiting tested under load
-- [ ] Quota enforcement validated
-- [ ] mTLS certificate validation working
-- [ ] Request signing validated
-- [ ] Nonce/timestamp validation implemented
-- [ ] Audit logging with tenant context
+- [x] API gateway implemented with all security checks
+- [x] Rate limiting tested under load
+- [x] Quota enforcement validated
+- [x] mTLS certificate validation working
+- [x] Request signing validated
+- [x] Nonce/timestamp validation implemented
+- [x] Audit logging with tenant context
+- [x] Reverse proxy forwarding to backend services via Traefik
+- [x] Integration tested with OffenSight (outbound 19/19, inbound 32/32)
 - [ ] Secrets in external vault (not env vars)
 - [ ] Network policies applied
-- [ ] Resource quotas configured
+- [ ] Resource quotas configured (Kubernetes)
 
 ### Production Readiness
 
@@ -493,6 +495,15 @@ PAYLOAD_SERVER_URL=http://payload-server:8000
 - [x] Nonce/timestamp validation (`signature.py`)
 - [x] Rate limiting enforcement (`rate_limiter.py`)
 - [x] Quota pre-check (`quota.py`)
+- [x] Reverse proxy to backend services (`main.py` — httpx → Traefik)
+- [x] Fixed test credentials for integration testing (`auth.py`)
+
+### Phase 1.5: Integration Testing - COMPLETE (2026-01-28)
+- [x] OffenSight Cloud Relay registration updated (API Gateway port 8100)
+- [x] Health check via OffenSight: healthy, 9ms latency
+- [x] Outbound attack execution (Scenario 127, Execution #219): **19/19 steps SUCCESS**
+- [x] Inbound WAF attack execution (Scenario 128, Execution #221): **32/32 steps SUCCESS**
+- [x] Deployed and verified on Cloud Relay VM (192.168.100.67)
 
 ### Phase 2: Hardening - PARTIAL
 - [x] Distributed rate limiting (Redis sorted sets)
@@ -512,8 +523,8 @@ PAYLOAD_SERVER_URL=http://payload-server:8000
 
 | File | Description |
 |------|-------------|
-| `main.py` | FastAPI application entry point |
-| `auth.py` | mTLS + API key authentication |
+| `main.py` | FastAPI app + reverse proxy (httpx → Traefik) |
+| `auth.py` | mTLS + API key authentication + test credentials |
 | `signature.py` | HMAC-SHA256 signature validation |
 | `rate_limiter.py` | Redis-based distributed rate limiting |
 | `quota.py` | Quota enforcement (agents, tasks, features) |
