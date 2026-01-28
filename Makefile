@@ -62,6 +62,19 @@ deploy:
 deploy-monitoring:
 	ssh $(VM_USER)@$(VM_HOST) "cd $(VM_DIR) && docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d prometheus grafana"
 
+# === Backup ===
+
+backup:
+	bash scripts/backup.sh
+
+restore:
+	@echo "Usage: make restore BACKUP=./backups/<timestamp>"
+	@test -n "$(BACKUP)" || { echo "ERROR: Set BACKUP=<path>"; exit 1; }
+	bash scripts/restore.sh $(BACKUP)
+
+install-backup-cron:
+	bash scripts/install-backup-cron.sh
+
 # === Cleanup ===
 
 clean:

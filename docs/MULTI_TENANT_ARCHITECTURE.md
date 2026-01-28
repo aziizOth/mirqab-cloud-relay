@@ -1012,6 +1012,51 @@ Local development shortcuts at project root:
 | `make validate` | Run hardening validation |
 | `make deploy` | SSH deploy to VM with health check |
 | `make clean` | Teardown with volume cleanup |
+| `make backup` | Run backup now |
+| `make restore BACKUP=<path>` | Restore from backup |
+| `make install-backup-cron` | Install daily 2 AM cron job |
+
+---
+
+## Backup Automation (2026-01-28)
+
+### What Gets Backed Up
+
+| Component | File | Method |
+|-----------|------|--------|
+| PostgreSQL (relay DB) | `relay-db.dump` | `pg_dump --format=custom --compress=9` |
+| PostgreSQL (msf DB) | `msf-db.dump` | Same (if exists) |
+| DB data volume | `relay-db-data.tar.gz` | Docker volume tar |
+| Payload storage | `payload-storage.tar.gz` | Docker volume tar |
+| C2 payloads | `c2-payloads.tar.gz` | Docker volume tar |
+| Configs | `configs.tar.gz` | .env, traefik/, monitoring/, compose files |
+
+### Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/backup.sh` | Full backup — DB dumps + volumes + configs + manifest |
+| `scripts/restore.sh` | Restore from backup directory (interactive confirmation) |
+| `scripts/install-backup-cron.sh` | Install daily cron at 02:00 with log rotation |
+
+### Retention
+
+- Default: 30 days (`RETENTION_DAYS` env var)
+- Old backups auto-deleted after each run
+- Each backup includes `manifest.json` with timestamp and file listing
+
+### Setup on VM
+
+```bash
+# One-time setup
+make install-backup-cron
+
+# Manual backup
+make backup
+
+# Restore
+make restore BACKUP=./backups/20260128-225519
+```
 
 ---
 
@@ -1044,4 +1089,5 @@ Local development shortcuts at project root:
 | **CI Pipeline** | GitHub Actions — lint, test, build, security scan on push/PR | IMPLEMENTED |
 | **VM Deploy Pipeline** | GitHub Actions — SSH deploy with health checks + validation | IMPLEMENTED |
 | **Image Registry** | Build & push to ghcr.io on version tags | IMPLEMENTED |
-| **Makefile** | Local build/test/deploy/monitoring shortcuts | IMPLEMENTED |
+| **Makefile** | Local build/test/deploy/monitoring/backup shortcuts | IMPLEMENTED |
+| **Backup Automation** | PostgreSQL + volumes + configs, 30-day retention, cron | IMPLEMENTED |

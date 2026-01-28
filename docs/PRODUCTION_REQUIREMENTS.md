@@ -523,7 +523,7 @@ PAYLOAD_SERVER_URL=http://payload-server:8000
 - [x] Hardening validation script (`scripts/validate-hardening.sh`) — 12/12 checks pass
 - [ ] External secrets operator (HashiCorp Vault / Alibaba KMS) — deferred to production
 
-### Phase 3: Operationalization - IN PROGRESS
+### Phase 3: Operationalization - COMPLETE (2026-01-28)
 - [x] Prometheus metrics in API Gateway (`metrics.py` — 8 custom metrics with tenant labels)
 - [x] `/metrics` endpoint exposing Prometheus format
 - [x] Middleware instrumented — request count, duration, auth failures, rate limits, proxy errors
@@ -537,7 +537,7 @@ PAYLOAD_SERVER_URL=http://payload-server:8000
 - [x] Deployed to VM — all 3 scrape targets UP
 - [x] CI/CD pipelines — GitHub Actions (CI, VM deploy, image build + push to ghcr.io)
 - [x] Makefile — local build/test/deploy shortcuts
-- [ ] Backup automation
+- [x] Backup automation — PostgreSQL dump, volume tarballs, config archive, 30-day retention, cron installer
 
 ---
 

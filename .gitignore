@@ -53,6 +53,9 @@ secrets/
 *_secret.txt
 !kubernetes/certificates/*.yaml
 
+# Backups
+backups/
+
 # Build artifacts
 *.ova
 *.qcow2
