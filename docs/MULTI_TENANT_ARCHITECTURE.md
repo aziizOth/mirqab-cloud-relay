@@ -822,6 +822,66 @@ End-to-end testing verified OffenSight executing attack scenarios through the AP
 
 ---
 
+## Phase 2 Hardening (2026-01-28)
+
+Production security hardening applied across secrets management, TLS, and Kubernetes.
+
+### Secrets Management
+
+All credentials externalized from `docker-compose.yml` to `.env` file:
+
+| Secret | Before | After |
+|--------|--------|-------|
+| `POSTGRES_PASSWORD` | Hardcoded `relay` | `${POSTGRES_PASSWORD:?err}` from `.env` |
+| `SIGNING_KEY` | Default `local-dev-key-change-me` | `${SIGNING_KEY:?err}` — no default |
+| `PHISHING_SIGNING_KEY` | Same weak default | `${PHISHING_SIGNING_KEY:?err}` |
+| `DATABASE_URL` | Inline `relay:relay` | Constructed from env vars |
+| `REDIS_PASSWORD` | None (open) | `${REDIS_PASSWORD}` — password-protected |
+| `TEST_API_KEY/SECRET` | Hardcoded in `auth.py` | Loaded via `load_secret()` from env |
+
+**Scripts:**
+- `scripts/generate-secrets.sh` — generates crypto-random secrets (`openssl rand -hex`)
+- `auth.py:load_secret()` — reads `*_FILE` env vars for Docker secrets pattern
+
+### TLS 1.3 Enforcement
+
+Traefik configured with strict TLS 1.3:
+
+```
+entryPoints.websecure → TLS 1.3 only
+Ciphers: TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256
+Curves: X25519, CurveP384
+```
+
+Security headers: HSTS (1 year, preload), nosniff, XSS filter, strict referrer policy.
+
+**Files:**
+- `traefik/traefik.yml` — static config with HTTPS entrypoint
+- `traefik/dynamic.yml` — TLS options + mTLS client auth + security headers
+- `scripts/generate-tls-certs.sh` — self-signed CA + server + client CA (ECDSA P-384)
+
+### Kubernetes Security
+
+| Manifest | Purpose |
+|----------|---------|
+| `kubernetes/base/rbac-system.yaml` | Least-privilege ServiceAccounts (api-gateway: read-only secrets, traefik: cluster-read) |
+| `kubernetes/base/resource-quota-system.yaml` | PodSecurityStandards (baseline enforce, restricted audit), ResourceQuota (CPU 8/16, mem 16/32Gi, 50 pods), LimitRange |
+| `kubernetes/base/network-policy-strict.yaml` | Default deny-all, per-service allowlists, cloud metadata blocked (169.254.169.254) |
+| `kubernetes/base/api-gateway-deployment.yaml` | 3 replicas, PDB, readOnlyRootFilesystem, drop ALL capabilities, topology spread |
+
+### Validation
+
+`scripts/validate-hardening.sh` — 12 automated checks, all passing on both local and VM:
+
+```
+[Secrets]   4/4 PASS — no hardcoded creds, .env exists, template documented
+[TLS]       2/2 PASS — TLS 1.3 configured, certs generated
+[Kubernetes] 4/4 PASS — RBAC, quotas, network policies, deployment manifests
+[Git Safety] 2/2 PASS — secrets/ and .env in .gitignore
+```
+
+---
+
 ## Summary
 
 | Feature | Implementation | Status |
@@ -832,9 +892,16 @@ End-to-end testing verified OffenSight executing attack scenarios through the AP
 | **Rate Limiting** | Redis sliding window per tenant | IMPLEMENTED |
 | **Quota Enforcement** | Tier-based limits | IMPLEMENTED |
 | **Reverse Proxy** | httpx forwarding to Traefik with tenant headers | IMPLEMENTED |
+| **Secrets Management** | .env externalization + load_secret() + generate script | IMPLEMENTED |
+| **TLS 1.3** | Traefik strict TLS 1.3, ECDSA P-384 certs, security headers | IMPLEMENTED |
+| **Kubernetes RBAC** | Least-privilege ServiceAccounts per service | IMPLEMENTED |
+| **Network Policies** | Default deny-all, per-service allowlists, metadata blocked | IMPLEMENTED |
+| **PodSecurityStandards** | Baseline enforce, restricted audit/warn | IMPLEMENTED |
+| **Resource Quotas** | System namespace capped, LimitRange defaults | IMPLEMENTED |
 | **Task Isolation** | Per-tenant Redis queues + DB foreign keys | IMPLEMENTED |
 | **Parallel Execution** | Workers claim from round-robin tenant queues | IMPLEMENTED |
 | **Result Routing** | Callback URL per tenant + signed payloads | IMPLEMENTED |
 | **Audit Trail** | All actions logged with tenant_id | IMPLEMENTED |
 | **Integration Testing** | OffenSight → Gateway → Traefik → Services | VERIFIED |
+| **Hardening Validation** | 12/12 automated security checks | VERIFIED |
 | **Metrics** | Prometheus metrics with tenant label | PARTIAL |
