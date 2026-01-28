@@ -1,5 +1,5 @@
 # Cloud Relay API Gateway
-# Handles routing, authentication, and service discovery
+# Multi-tenant security gateway with mTLS, rate limiting, and quota enforcement
 
 FROM python:3.11-slim as builder
 
@@ -36,18 +36,26 @@ COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
 
 # Copy application code
-COPY --chown=gateway:root src/ ./src/
-COPY --chown=gateway:root config/ ./config/
+COPY --chown=gateway:root *.py ./
 
 # Switch to non-root user
 USER gateway
 
-# Expose ports
-EXPOSE 8443 9090
+# Environment variables (can be overridden at runtime)
+ENV REDIS_URL=redis://redis:6379/0 \
+    REQUIRE_MTLS=true \
+    REQUIRE_SIGNATURE=true \
+    DEBUG=false \
+    HTTP_C2_URL=http://http-c2:8080 \
+    WAF_TESTER_URL=http://waf-tester:8080 \
+    PAYLOAD_SERVER_URL=http://payload-server:8080
+
+# Expose HTTP port (TLS terminated at ingress)
+EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f -k https://localhost:8443/health || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the application
-ENTRYPOINT ["python", "-m", "src.main"]
+# Run the application with uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

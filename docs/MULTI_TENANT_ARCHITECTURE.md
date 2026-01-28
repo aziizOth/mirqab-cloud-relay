@@ -690,14 +690,87 @@ spec:
 
 ---
 
+## API Gateway Implementation Status
+
+The API Gateway security layer has been **fully implemented** in `services/api-gateway/`:
+
+### Implemented Components
+
+| Component | File | Status |
+|-----------|------|--------|
+| **Authentication** | `auth.py` | COMPLETE |
+| **Signature Validation** | `signature.py` | COMPLETE |
+| **Rate Limiting** | `rate_limiter.py` | COMPLETE |
+| **Quota Enforcement** | `quota.py` | COMPLETE |
+| **Security Middleware** | `middleware.py` | COMPLETE |
+| **FastAPI Application** | `main.py` | COMPLETE |
+
+### Security Features Implemented
+
+1. **Multi-Layer Authentication**
+   - mTLS certificate validation (extract tenant ID from CN)
+   - API key validation (constant-time comparison)
+   - X-Tenant-ID header verification (must match certificate)
+
+2. **Request Signature Validation**
+   - HMAC-SHA256 signature: `HMAC(api_secret, body|timestamp|nonce)`
+   - Timestamp validation (5-minute tolerance)
+   - Nonce tracking in Redis (10-minute expiry, prevents replay attacks)
+
+3. **Distributed Rate Limiting**
+   - Sliding window algorithm using Redis sorted sets
+   - Per-tenant rate limits based on tier
+   - Concurrent task limiting using Redis sets
+   - Graceful degradation if Redis unavailable
+
+4. **Quota Enforcement**
+   - Agent count limits per tier
+   - Concurrent task limits per tier
+   - Feature access control (WAF, C2, payload, phishing per tier)
+   - Resource limits (CPU, memory)
+
+5. **Audit Logging**
+   - All requests logged with tenant context
+   - Request ID and correlation ID tracking
+   - Events stored in Redis for async processing
+
+### API Gateway Endpoints
+
+| Endpoint | Auth Required | Description |
+|----------|---------------|-------------|
+| `GET /health` | No | Health check |
+| `GET /ready` | No | Readiness probe (checks Redis) |
+| `GET /api/v1` | Yes | API version info |
+| `POST /api/v1/tasks` | Yes | Create new task |
+| `GET /api/v1/tasks/{id}` | Yes | Get task status |
+| `DELETE /api/v1/tasks/{id}` | Yes | Cancel task |
+| `POST /api/v1/c2/kill-all` | Yes | Emergency C2 kill switch |
+| `GET /api/v1/quota` | Yes | Get quota usage |
+
+### Docker Deployment
+
+```bash
+# Local testing
+docker compose up -d redis api-gateway
+curl http://localhost:8100/health
+
+# Production (with full security)
+REQUIRE_MTLS=true REQUIRE_SIGNATURE=true docker compose up -d api-gateway
+```
+
+---
+
 ## Summary
 
-| Feature | Implementation |
-|---------|----------------|
-| **Tenant Identification** | X-Tenant-ID header + mTLS certificate |
-| **Task Isolation** | Per-tenant Redis queues + DB foreign keys |
-| **Parallel Execution** | Workers claim from round-robin tenant queues |
-| **Result Routing** | Callback URL per tenant + signed payloads |
-| **Rate Limiting** | Per-tenant concurrent + hourly limits |
-| **Audit Trail** | All actions logged with tenant_id |
-| **Metrics** | Prometheus metrics with tenant label |
+| Feature | Implementation | Status |
+|---------|----------------|--------|
+| **Tenant Identification** | X-Tenant-ID header + mTLS certificate | IMPLEMENTED |
+| **API Key Authentication** | X-API-Key header validation | IMPLEMENTED |
+| **Request Signing** | HMAC-SHA256 with nonce/timestamp | IMPLEMENTED |
+| **Rate Limiting** | Redis sliding window per tenant | IMPLEMENTED |
+| **Quota Enforcement** | Tier-based limits | IMPLEMENTED |
+| **Task Isolation** | Per-tenant Redis queues + DB foreign keys | IMPLEMENTED |
+| **Parallel Execution** | Workers claim from round-robin tenant queues | IMPLEMENTED |
+| **Result Routing** | Callback URL per tenant + signed payloads | IMPLEMENTED |
+| **Audit Trail** | All actions logged with tenant_id | IMPLEMENTED |
+| **Metrics** | Prometheus metrics with tenant label | PARTIAL |

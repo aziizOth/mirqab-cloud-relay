@@ -8,6 +8,44 @@ version: '3.8'
 
 services:
   # ===========================================
+  # API GATEWAY - Security Layer
+  # ===========================================
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: relay-api-gateway
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - REQUIRE_MTLS=false  # Disabled for local dev
+      - REQUIRE_SIGNATURE=false  # Disabled for local dev
+      - DEBUG=true
+      - HTTP_C2_URL=http://http-c2:8080
+      - WAF_TESTER_URL=http://waf-tester:8443
+      - PAYLOAD_SERVER_URL=http://payload-service:8000
+      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8000
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - relay-net
+    ports:
+      - "8100:8000"  # API Gateway port
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api-gateway.rule=PathPrefix(`/api/v1`)"
+      - "traefik.http.routers.api-gateway.entrypoints=web"
+      - "traefik.http.services.api-gateway.loadbalancer.server.port=8000"
+      - "traefik.http.routers.api-gateway.priority=200"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # ===========================================
   # REVERSE PROXY
   # ===========================================
   traefik:
