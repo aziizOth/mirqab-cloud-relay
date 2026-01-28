@@ -1,0 +1,78 @@
+name: Deploy to VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      with_monitoring:
+        description: "Include monitoring stack (Prometheus + Grafana)"
+        required: false
+        default: "true"
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to Cloud Relay VM
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/relay_key
+          chmod 600 ~/.ssh/relay_key
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull latest code on VM
+        run: |
+          ssh -i ~/.ssh/relay_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "cd ~/mirqab-cloud-relay && git pull origin master"
+
+      - name: Generate secrets if missing
+        run: |
+          ssh -i ~/.ssh/relay_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "cd ~/mirqab-cloud-relay && [ -f .env ] || bash scripts/generate-secrets.sh"
+
+      - name: Build and deploy
+        run: |
+          ssh -i ~/.ssh/relay_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
+            cd ~/mirqab-cloud-relay
+            docker compose build
+            docker compose up -d
+            if [ "${{ inputs.with_monitoring }}" = "true" ]; then
+              docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d prometheus grafana
+            fi
+          EOF
+
+      - name: Health checks
+        run: |
+          ssh -i ~/.ssh/relay_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
+            echo "Waiting for services..."
+            sleep 15
+            FAIL=0
+            for endpoint in \
+              "http://localhost:8100/health" \
+              "http://localhost:8280/api/rawdata"; do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$endpoint" 2>/dev/null || echo "000")
+              if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+                echo "[OK] $endpoint ($STATUS)"
+              else
+                echo "[FAIL] $endpoint ($STATUS)"
+                FAIL=1
+              fi
+            done
+            exit $FAIL
+          EOF
+
+      - name: Validate hardening
+        run: |
+          ssh -i ~/.ssh/relay_key ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+            "cd ~/mirqab-cloud-relay && bash scripts/validate-hardening.sh"
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/relay_key

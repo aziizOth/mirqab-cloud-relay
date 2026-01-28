@@ -535,8 +535,9 @@ PAYLOAD_SERVER_URL=http://payload-server:8000
 - [x] Cloud Relay Overview dashboard — service health, error rate gauge, top tenants, rate limit events
 - [x] Traefik metrics enabled (entrypoints, routers, services labels)
 - [x] Deployed to VM — all 3 scrape targets UP
+- [x] CI/CD pipelines — GitHub Actions (CI, VM deploy, image build + push to ghcr.io)
+- [x] Makefile — local build/test/deploy shortcuts
 - [ ] Backup automation
-- [ ] CI/CD pipelines
 
 ---
 
