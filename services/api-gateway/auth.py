@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -351,6 +352,24 @@ def create_test_tenant(
     return tenant
 
 
-# Fixed test credentials for integration testing
-TEST_API_KEY = "cloud-relay-test-api-key-2026"
-TEST_API_SECRET = "cloud-relay-test-api-secret-2026"
+def load_secret(env_var: str) -> str:
+    """
+    Load a secret from environment variable or Docker secrets file.
+
+    Checks {env_var}_FILE first (Docker secrets pattern: /run/secrets/...),
+    falls back to {env_var} environment variable.
+    """
+    file_path = os.getenv(f"{env_var}_FILE")
+    if file_path:
+        try:
+            with open(file_path) as f:
+                return f.read().strip()
+        except OSError:
+            pass
+    return os.getenv(env_var, "")
+
+
+# Test credentials — loaded from env vars (set in docker-compose.yml or .env)
+# Defaults provided for backward compatibility in local dev
+TEST_API_KEY = load_secret("TEST_API_KEY") or "cloud-relay-test-api-key-2026"
+TEST_API_SECRET = load_secret("TEST_API_SECRET") or "cloud-relay-test-api-secret-2026"

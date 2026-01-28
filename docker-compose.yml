@@ -1,10 +1,10 @@
 # Mirqab Cloud Relay - Local Development
 # Docker Compose for running all relay services locally
-# Updated: 2026-01-24 - Added Payload Service with PostgreSQL
+# Updated: 2026-01-28 - Phase 2 Hardening: Externalized secrets to .env
 #   - MASTER_SERVER_URL = Customer's OffenSight instance (attack orchestration)
 #   - Command Center = Mirqab management portal (licenses, feeds) - NOT used here
-
-version: '3.8'
+#
+# SETUP: cp .env.template .env && ./scripts/generate-secrets.sh
 
 services:
   # ===========================================
@@ -16,15 +16,17 @@ services:
       dockerfile: Dockerfile
     container_name: relay-api-gateway
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - REQUIRE_MTLS=false  # Disabled for local dev
-      - REQUIRE_SIGNATURE=false  # Disabled for local dev
-      - DEBUG=true
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - REQUIRE_MTLS=${REQUIRE_MTLS:-false}
+      - REQUIRE_SIGNATURE=${REQUIRE_SIGNATURE:-false}
+      - DEBUG=${DEBUG:-true}
       - HTTP_C2_URL=http://http-c2:8080
       - WAF_TESTER_URL=http://waf-tester:8443
       - PAYLOAD_SERVER_URL=http://payload-service:8000
       - TRAEFIK_BACKEND_URL=http://traefik:80
-      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8000
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:8000}
+      - TEST_API_KEY=${TEST_API_KEY:-cloud-relay-test-api-key-2026}
+      - TEST_API_SECRET=${TEST_API_SECRET:-cloud-relay-test-api-secret-2026}
     depends_on:
       redis:
         condition: service_healthy
@@ -52,19 +54,15 @@ services:
   traefik:
     image: traefik:v3.0
     container_name: relay-traefik
-    command:
-      - "--api.dashboard=true"
-      - "--api.insecure=true"
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--entrypoints.web.address=:80"
-      - "--accesslog=true"
-      - "--log.level=INFO"
-    ports:
-      - "8180:80"      # Changed from 80 to avoid conflicts
-      - "8280:8080"    # Traefik dashboard
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./traefik/certs:/etc/traefik/certs:ro
+    ports:
+      - "8180:80"      # HTTP
+      - "8453:443"     # HTTPS (TLS 1.3)
+      - "8280:8080"    # Traefik dashboard
     networks:
       - relay-net
     restart: unless-stopped
@@ -76,9 +74,9 @@ services:
     image: postgres:15-alpine
     container_name: relay-db
     environment:
-      - POSTGRES_USER=relay
-      - POSTGRES_PASSWORD=relay
-      - POSTGRES_DB=relay
+      - POSTGRES_USER=${POSTGRES_USER:-relay}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      - POSTGRES_DB=${POSTGRES_DB:-relay}
     volumes:
       - relay-db-data:/var/lib/postgresql/data
     networks:
@@ -99,7 +97,7 @@ services:
       dockerfile: Dockerfile
     container_name: relay-payload
     environment:
-      - DATABASE_URL=postgresql://relay:relay@relay-db:5432/relay
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-relay}:${POSTGRES_PASSWORD:?err}@relay-db:5432/${POSTGRES_DB:-relay}
       - STORAGE_PATH=/payloads
       - LOG_LEVEL=INFO
     volumes:
@@ -134,7 +132,7 @@ services:
     environment:
       - ENVIRONMENT=local
       - MASTER_SERVER_URL=http://host.docker.internal:8000  # OffenSight instance
-      - SIGNING_KEY=${SIGNING_KEY:-local-dev-key-change-me}
+      - SIGNING_KEY=${SIGNING_KEY:?Set SIGNING_KEY in .env}
       - STORAGE_BACKEND=local
     networks:
       - relay-net
@@ -163,7 +161,7 @@ services:
     environment:
       - PHISHING_ENVIRONMENT=local
       - PHISHING_COMMAND_CENTER_URL=http://host.docker.internal:8000
-      - PHISHING_SIGNING_KEY=${SIGNING_KEY:-local-dev-key-change-me}
+      - PHISHING_SIGNING_KEY=${PHISHING_SIGNING_KEY:?Set PHISHING_SIGNING_KEY in .env}
       - PHISHING_SMTP_HOST=mailhog
       - PHISHING_SMTP_PORT=1025
       - PHISHING_SMTP_USE_TLS=false
@@ -206,11 +204,17 @@ services:
   redis:
     image: redis:7-alpine
     container_name: relay-redis
-    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    command: >
+      sh -c "redis-server
+      --maxmemory 128mb
+      --maxmemory-policy allkeys-lru
+      $${REDIS_PASSWORD:+--requirepass $${REDIS_PASSWORD}}"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
     networks:
       - relay-net
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli ${REDIS_PASSWORD:+-a $REDIS_PASSWORD} ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -225,9 +229,10 @@ services:
       dockerfile: Dockerfile
     container_name: relay-waf-tester
     environment:
-      - DATABASE_URL=postgresql://relay:relay@relay-db:5432/relay
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-relay}:${POSTGRES_PASSWORD:?err}@relay-db:5432/${POSTGRES_DB:-relay}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - LOG_LEVEL=info
       - ENABLE_LLM_ANALYSIS=true
       # - OPENAI_API_KEY=${OPENAI_API_KEY}  # Optional for LLM fallback
@@ -354,7 +359,7 @@ services:
     image: metasploitframework/metasploit-framework:latest
     container_name: relay-metasploit
     environment:
-      - DATABASE_URL=postgresql://relay:relay@relay-db:5432/msf
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-relay}:${POSTGRES_PASSWORD:?err}@relay-db:5432/msf
     volumes:
       - msf-data:/root/.msf4
       - c2-payloads:/payloads

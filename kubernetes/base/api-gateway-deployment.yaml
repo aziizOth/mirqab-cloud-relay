@@ -1,0 +1,152 @@
+# API Gateway Kubernetes Deployment
+# Hardened with security contexts, secret refs, and health probes
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: mirqab-system
+  labels:
+    app: api-gateway
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/part-of: mirqab-cloud-relay
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+        app.kubernetes.io/name: api-gateway
+      annotations:
+        seccomp.security.alpha.kubernetes.io/pod: runtime/default
+    spec:
+      serviceAccountName: api-gateway
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api-gateway
+          image: ghcr.io/mirqab/cloud-relay/api-gateway:latest
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: redis-credentials
+                  key: url
+            - name: SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: api-gateway-secrets
+                  key: signing-key
+            - name: REQUIRE_MTLS
+              value: "true"
+            - name: REQUIRE_SIGNATURE
+              value: "true"
+            - name: DEBUG
+              value: "false"
+            - name: HTTP_C2_URL
+              value: "http://http-c2:8080"
+            - name: WAF_TESTER_URL
+              value: "http://waf-tester:8443"
+            - name: PAYLOAD_SERVER_URL
+              value: "http://payload-service:8000"
+            - name: TRAEFIK_BACKEND_URL
+              value: "http://traefik:80"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 100Mi
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: api-gateway
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: mirqab-system
+  labels:
+    app: api-gateway
+spec:
+  selector:
+    app: api-gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway-pdb
+  namespace: mirqab-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: api-gateway

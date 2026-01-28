@@ -1,0 +1,202 @@
+# Strict Network Policies for Cloud Relay
+# Default deny-all with explicit allowlists per service
+---
+# Default: deny all ingress and egress in system namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: mirqab-system
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# API Gateway: accept from Traefik, connect to Redis + Traefik
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-gateway-policy
+  namespace: mirqab-system
+spec:
+  podSelector:
+    matchLabels:
+      app: api-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: traefik
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Traefik (for reverse proxy forwarding)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: traefik
+      ports:
+        - protocol: TCP
+          port: 80
+    # DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Traefik: accept from external, connect to backend services
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: traefik-policy
+  namespace: mirqab-system
+spec:
+  podSelector:
+    matchLabels:
+      app: traefik
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # External traffic (Internet / API Gateway)
+    - ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+  egress:
+    # Backend services within namespace
+    - to:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 8443
+    # DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+
+---
+# Redis: accept only from API Gateway and WAF Tester
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-policy
+  namespace: mirqab-system
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+        - podSelector:
+            matchLabels:
+              app: waf-tester
+      ports:
+        - protocol: TCP
+          port: 6379
+  # Redis needs no egress
+  egress: []
+
+---
+# PostgreSQL: accept only from services that need DB
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-policy
+  namespace: mirqab-system
+spec:
+  podSelector:
+    matchLabels:
+      app: relay-db
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: payload-service
+        - podSelector:
+            matchLabels:
+              app: waf-tester
+        - podSelector:
+            matchLabels:
+              app: metasploit
+      ports:
+        - protocol: TCP
+          port: 5432
+  egress: []
+
+---
+# C2 services: block cloud metadata, allow outbound to targets
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: c2-egress-policy
+  namespace: mirqab-system
+spec:
+  podSelector:
+    matchLabels:
+      mirqab.io/component: c2
+  policyTypes:
+    - Egress
+  egress:
+    # Allow outbound to targets but block cloud metadata
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16      # Link-local / cloud metadata
+              - 169.254.169.254/32  # AWS/GCP/Alibaba metadata endpoint
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8000
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53

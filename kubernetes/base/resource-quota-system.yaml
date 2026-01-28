@@ -1,0 +1,94 @@
+# Resource Quotas and PodSecurityStandards for Cloud Relay
+---
+# System namespace with Pod Security Standards
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mirqab-system
+  labels:
+    app.kubernetes.io/name: mirqab-cloud-relay
+    # Pod Security Standards (PSS) — enforce baseline, audit restricted
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+
+---
+# Tenant namespace template — restricted PSS
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mirqab-tenant-template
+  labels:
+    app.kubernetes.io/part-of: mirqab-cloud-relay
+    mirqab.io/type: tenant
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+
+---
+# System namespace resource quota
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: system-quota
+  namespace: mirqab-system
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: "16Gi"
+    limits.cpu: "16"
+    limits.memory: "32Gi"
+    pods: "50"
+    services: "20"
+    services.loadbalancers: "1"
+    services.nodeports: "0"
+    persistentvolumeclaims: "10"
+
+---
+# Default container limits for system namespace
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: system-limits
+  namespace: mirqab-system
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: "1Gi"
+      defaultRequest:
+        cpu: "200m"
+        memory: "256Mi"
+      max:
+        cpu: "4"
+        memory: "8Gi"
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+
+---
+# Per-tenant resource quota template
+# Apply when provisioning new tenants (substitute tenant_id)
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-quota
+  namespace: mirqab-tenant-template
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: "4Gi"
+    limits.cpu: "4"
+    limits.memory: "8Gi"
+    pods: "10"
+    services: "5"
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+    persistentvolumeclaims: "5"

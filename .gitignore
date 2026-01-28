@@ -45,9 +45,12 @@ logs/
 *.env
 
 # Secrets
+secrets/
 *.pem
 *.key
 *.crt
+*_password.txt
+*_secret.txt
 !kubernetes/certificates/*.yaml
 
 # Build artifacts

@@ -1,0 +1,36 @@
+# Traefik Static Configuration
+# Cloud Relay reverse proxy with TLS 1.3 enforcement
+
+api:
+  dashboard: true
+  insecure: true  # Dashboard on :8080 — restrict in production
+
+providers:
+  docker:
+    exposedByDefault: false
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
+
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+    http:
+      tls:
+        options: strict-tls13
+
+log:
+  level: INFO
+
+accessLog:
+  bufferingSize: 100
+  fields:
+    headers:
+      defaultMode: drop
+      names:
+        X-Request-ID: keep
+        X-Verified-Tenant-ID: keep
+        X-Forwarded-For: keep
+        User-Agent: keep

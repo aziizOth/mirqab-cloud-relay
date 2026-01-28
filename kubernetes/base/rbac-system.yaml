@@ -1,0 +1,104 @@
+# Kubernetes RBAC for Cloud Relay System Components
+# Principle of least privilege — each service gets minimal permissions
+---
+# API Gateway Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-gateway
+  namespace: mirqab-system
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/part-of: mirqab-cloud-relay
+automountServiceAccountToken: false
+
+---
+# API Gateway Role — read-only access to own secrets/config
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: api-gateway-role
+  namespace: mirqab-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["api-gateway-secrets", "redis-credentials", "postgres-credentials"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["relay-config"]
+    verbs: ["get", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: api-gateway-binding
+  namespace: mirqab-system
+subjects:
+  - kind: ServiceAccount
+    name: api-gateway
+    namespace: mirqab-system
+roleRef:
+  kind: Role
+  name: api-gateway-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Traefik Ingress Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traefik-ingress
+  namespace: mirqab-system
+  labels:
+    app.kubernetes.io/name: traefik
+    app.kubernetes.io/part-of: mirqab-cloud-relay
+
+---
+# Traefik needs cluster-wide read access to services/endpoints/ingresses
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: traefik-ingress-role
+rules:
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses/status"]
+    verbs: ["update"]
+  - apiGroups: ["traefik.io"]
+    resources: ["middlewares", "ingressroutes", "tlsoptions"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traefik-ingress-binding
+subjects:
+  - kind: ServiceAccount
+    name: traefik-ingress
+    namespace: mirqab-system
+roleRef:
+  kind: ClusterRole
+  name: traefik-ingress-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Backend services — no API server access needed
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: relay-backend
+  namespace: mirqab-system
+  labels:
+    app.kubernetes.io/part-of: mirqab-cloud-relay
+automountServiceAccountToken: false

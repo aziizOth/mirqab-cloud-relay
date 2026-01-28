@@ -505,11 +505,23 @@ PAYLOAD_SERVER_URL=http://payload-server:8000
 - [x] Inbound WAF attack execution (Scenario 128, Execution #221): **32/32 steps SUCCESS**
 - [x] Deployed and verified on Cloud Relay VM (192.168.100.67)
 
-### Phase 2: Hardening - PARTIAL
+### Phase 2: Hardening - COMPLETE (2026-01-28)
 - [x] Distributed rate limiting (Redis sorted sets)
 - [x] Audit logging with tenant context
-- [ ] Secrets management integration (HashiCorp Vault)
-- [ ] Network policy validation (Kubernetes)
+- [x] Secrets externalized to .env (no hardcoded credentials in docker-compose)
+- [x] `load_secret()` supports Docker secrets file pattern (`*_FILE` env vars)
+- [x] Secret generation script (`scripts/generate-secrets.sh`)
+- [x] TLS 1.3 enforced on Traefik (strict cipher suite: AES-256-GCM, ChaCha20, AES-128-GCM)
+- [x] Self-signed CA + server + client-CA cert generation (`scripts/generate-tls-certs.sh`)
+- [x] Redis password protection (configurable via .env)
+- [x] Kubernetes RBAC — least-privilege ServiceAccounts for api-gateway, traefik
+- [x] PodSecurityStandards — baseline (enforce), restricted (audit/warn)
+- [x] Resource quotas — system namespace (CPU 8/16, memory 16Gi/32Gi, 50 pods)
+- [x] Strict network policies — default deny-all, explicit allowlists per service
+- [x] Cloud metadata endpoint blocked for C2 services (169.254.169.254)
+- [x] API Gateway K8s deployment — 3 replicas, readOnlyRootFilesystem, drop ALL capabilities
+- [x] Hardening validation script (`scripts/validate-hardening.sh`) — 12/12 checks pass
+- [ ] External secrets operator (HashiCorp Vault / Alibaba KMS) — deferred to production
 
 ### Phase 3: Operationalization - PENDING
 - [ ] Monitoring dashboards (Prometheus/Grafana)
