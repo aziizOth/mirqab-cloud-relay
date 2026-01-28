@@ -882,6 +882,88 @@ Security headers: HSTS (1 year, preload), nosniff, XSS filter, strict referrer p
 
 ---
 
+## Phase 3 Monitoring (2026-01-28)
+
+### API Gateway Prometheus Metrics
+
+Custom metrics instrumented in `services/api-gateway/metrics.py` and wired through middleware:
+
+| Metric | Type | Labels | Purpose |
+|--------|------|--------|---------|
+| `gateway_requests_total` | Counter | method, path, status, tenant_id | Request throughput and error rates |
+| `gateway_request_duration_seconds` | Histogram | method, path, tenant_id | Latency percentiles (p50/p95/p99) |
+| `gateway_active_requests` | Gauge | tenant_id | In-flight request count |
+| `gateway_auth_failures_total` | Counter | reason | Auth failure breakdown |
+| `gateway_rate_limit_hits_total` | Counter | tenant_id | Rate limit violations per tenant |
+| `gateway_quota_exceeded_total` | Counter | tenant_id, feature | Quota exceeded events |
+| `gateway_proxy_errors_total` | Counter | backend, error_type | Backend proxy failures |
+| `gateway_proxy_duration_seconds` | Histogram | backend | Backend response latency |
+
+### Monitoring Stack
+
+Docker Compose overlay (`docker-compose.monitoring.yml`) adds:
+
+```
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+```
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| **Prometheus** | 9090 | Metrics collection, alerting rules, query API |
+| **Grafana** | 3000 | Dashboards, visualizations (admin/admin) |
+
+Prometheus scrapes three targets every 15 seconds:
+- `api-gateway:8000/metrics` — custom gateway metrics
+- `traefik:8080/metrics` — reverse proxy metrics (entrypoints, routers, services)
+- `localhost:9090/metrics` — Prometheus self-monitoring
+
+### Alert Rules (7 rules)
+
+| Alert | Severity | Condition | For |
+|-------|----------|-----------|-----|
+| GatewayDown | critical | api-gateway target down | 1m |
+| TraefikDown | critical | traefik target down | 1m |
+| HighErrorRate | warning | >5% 5xx responses | 5m |
+| HighLatencyP95 | warning | p95 latency >2s | 5m |
+| RateLimitSpike | warning | >10 hits/sec sustained | 2m |
+| AuthFailureSpike | warning | >5 failures/sec sustained | 2m |
+| BackendProxyErrors | critical | sustained proxy errors per backend | 3m |
+
+### Grafana Dashboards
+
+Two auto-provisioned dashboards in the "Cloud Relay" folder:
+
+**API Gateway Dashboard** (`api-gateway.json`):
+- Request rate by status code (2xx green, 4xx yellow, 5xx red)
+- Error rate percentage (stat panel with thresholds)
+- Active requests gauge
+- Latency percentiles (p50, p95, p99 timeseries)
+- Rate limit hits per tenant (bar chart)
+- Auth failures by reason (pie chart)
+- Proxy errors by backend
+- Backend proxy latency p95
+- Request volume by tenant
+- Top 10 paths by traffic
+
+**Cloud Relay Overview Dashboard** (`cloud-relay-overview.json`):
+- Service health UP/DOWN status
+- Total request rate, error rate gauge, p95 latency, auth failure count
+- Traffic by status code over time
+- Top tenants by request volume (bar gauge)
+- Backend proxy health
+- Rate limit & quota events timeline
+
+### Verification
+
+All three Prometheus scrape targets confirmed UP on both local and VM (192.168.100.67):
+```
+api-gateway: up
+prometheus:  up
+traefik:     up
+```
+
+---
+
 ## Summary
 
 | Feature | Implementation | Status |
@@ -904,4 +986,7 @@ Security headers: HSTS (1 year, preload), nosniff, XSS filter, strict referrer p
 | **Audit Trail** | All actions logged with tenant_id | IMPLEMENTED |
 | **Integration Testing** | OffenSight → Gateway → Traefik → Services | VERIFIED |
 | **Hardening Validation** | 12/12 automated security checks | VERIFIED |
-| **Metrics** | Prometheus metrics with tenant label | PARTIAL |
+| **Metrics** | Prometheus metrics with tenant labels (8 custom metrics) | IMPLEMENTED |
+| **Monitoring Stack** | Prometheus + Grafana (Docker Compose overlay) | IMPLEMENTED |
+| **Alert Rules** | 7 rules — gateway, latency, auth, proxy, rate limits | IMPLEMENTED |
+| **Grafana Dashboards** | API Gateway + Cloud Relay Overview (auto-provisioned) | IMPLEMENTED |
