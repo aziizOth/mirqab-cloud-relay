@@ -1,6 +1,6 @@
 # Mirqab Cloud Relay — Build & Deploy
 
-.PHONY: build up down restart logs test lint validate deploy monitoring clean
+.PHONY: build up down restart logs test lint load-test validate deploy monitoring clean
 
 # === Local Development ===
 
@@ -34,6 +34,12 @@ test:
 
 lint:
 	ruff check services/ tests/ --select E,F,W --ignore E501
+
+load-test:
+	locust -f tests/load/locustfile.py --host=http://localhost:8100
+
+load-test-headless:
+	locust -f tests/load/locustfile.py --host=http://localhost:8100 --headless -u 50 -r 10 --run-time 60s --html=tests/load/report.html
 
 # === Security ===
 

@@ -63,6 +63,7 @@ manifest.json
 
 # Test
 .pytest_cache/
+tests/load/report.html
 .coverage
 htmlcov/
 
